@@ -77,10 +77,17 @@ class DuckDBClient:
         """
         self.execute(query)
 
-    def get_services_metrics(self, table_name):
+    def get_services_metrics(self, table_name, anchor_date=None):
+        if anchor_date is None:
+            last_cte = f"SELECT MAX(date) AS last_date FROM {table_name}"
+            params = None
+        else:
+            last_cte = "SELECT CAST(? AS DATE) AS last_date"
+            params = [anchor_date]
+
         query = f"""
             WITH last AS (
-                SELECT MAX(date) AS last_date FROM {table_name}
+                {last_cte}
             ),
             params AS (
                 SELECT
@@ -196,6 +203,18 @@ class DuckDBClient:
             LEFT JOIN avg6     ON avg6.account = mtd.account AND avg6.service = mtd.service
             LEFT JOIN avg12    ON avg12.account = mtd.account AND avg12.service = mtd.service
             ORDER BY mtd.account, mtd.service;
+        """
+        return self.execute(query, params=params)
+
+    def get_available_month_anchors(self, table_name):
+        query = f"""
+            SELECT
+                account,
+                CAST(date_trunc('month', date) AS DATE) AS month_start,
+                CAST(MAX(date) AS DATE) AS anchor_date
+            FROM {table_name}
+            GROUP BY account, date_trunc('month', date)
+            ORDER BY account, month_start DESC;
         """
         return self.execute(query)
 

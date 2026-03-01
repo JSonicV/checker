@@ -11,6 +11,20 @@ from duckdb_client import get_duckdb_client
 
 DEFAULT_DB_NAME = os.environ.get("DUCKDB_DATABASE", "database.duckdb")
 DEFAULT_TABLE = os.environ.get("DUCKDB_TABLE", "costs")
+MONTH_NAMES_IT = {
+    1: "gennaio",
+    2: "febbraio",
+    3: "marzo",
+    4: "aprile",
+    5: "maggio",
+    6: "giugno",
+    7: "luglio",
+    8: "agosto",
+    9: "settembre",
+    10: "ottobre",
+    11: "novembre",
+    12: "dicembre",
+}
 
 
 def get_db_path(db_name: str) -> Path:
@@ -21,6 +35,18 @@ def get_db_path(db_name: str) -> Path:
 def load_data(db_name: str, table_name: str):
     client = get_duckdb_client(db_name)
     return client.get_services_metrics(table_name)
+
+
+@st.cache_data(show_spinner=False)
+def load_data_for_anchor(db_name: str, table_name: str, anchor_date: str):
+    client = get_duckdb_client(db_name)
+    return client.get_services_metrics(table_name, anchor_date=anchor_date)
+
+
+@st.cache_data(show_spinner=False)
+def load_available_month_anchors(db_name: str, table_name: str):
+    client = get_duckdb_client(db_name)
+    return client.get_available_month_anchors(table_name)
 
 
 def safe_div(numerator, denominator):
@@ -92,6 +118,10 @@ def build_total_series(df: pd.DataFrame, metric_cols: list[str]) -> pd.Series:
     return pd.Series(totals)
 
 
+def format_month_label(month_start) -> str:
+    return f"{MONTH_NAMES_IT[month_start.month].capitalize()} {month_start.year}"
+
+
 def main() -> None:
     st.set_page_config(page_title="AWS Costs Dashboard", layout="wide")
     st.title("AWS Costs Dashboard")
@@ -116,11 +146,25 @@ def main() -> None:
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
 
+    month_anchors = load_available_month_anchors(db_name, table_name)
+    if not month_anchors.empty:
+        month_anchors["month_start"] = pd.to_datetime(
+            month_anchors["month_start"], errors="coerce"
+        ).dt.date
+        month_anchors["anchor_date"] = pd.to_datetime(
+            month_anchors["anchor_date"], errors="coerce"
+        ).dt.date
+        month_anchors = month_anchors.dropna(
+            subset=["account", "month_start", "anchor_date"]
+        )
+
     accounts = sorted(df["account"].dropna().unique().tolist())
-    services = sorted(df["service"].dropna().unique().tolist())
+    service_names = sorted(df["service"].dropna().unique().tolist())
 
     account_filter = st.sidebar.multiselect("Account", accounts, default=accounts)
-    service_filter = st.sidebar.multiselect("Service", services, default=services)
+    service_filter = st.sidebar.multiselect(
+        "Service", service_names, default=service_names
+    )
 
     filtered = df[
         df["account"].isin(account_filter) & df["service"].isin(service_filter)
@@ -154,6 +198,40 @@ def main() -> None:
         }
         .account-sep {
             margin-bottom: 72px;
+        }
+        .table-updated-at {
+            margin: 0;
+            display: flex;
+            align-items: center;
+            min-height: 38px;
+            font-size: 12px;
+            font-weight: 500;
+            color: #6B7280;
+            line-height: 1.2;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.table-updated-at):has(div[data-testid="stDownloadButton"]) {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            gap: 12px;
+            margin: 4px 0 6px 4px;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.table-updated-at):has(div[data-testid="stDownloadButton"]) > div[data-testid="stColumn"] {
+            display: flex;
+            align-items: center;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.table-updated-at):has(div[data-testid="stDownloadButton"]) > div[data-testid="stColumn"]:first-child {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.table-updated-at):has(div[data-testid="stDownloadButton"]) > div[data-testid="stColumn"]:first-child > div[data-testid="stVerticalBlock"] {
+            display: flex;
+            justify-content: center;
+            width: 100%;
+        }
+        div[data-testid="stHorizontalBlock"]:has(.table-updated-at):has(div[data-testid="stDownloadButton"]) > div[data-testid="stColumn"]:last-child {
+            flex: 0 0 auto;
+            width: auto;
         }
         table.costs-table {
             border-collapse: separate;
@@ -246,8 +324,34 @@ def main() -> None:
             background: #FFFFFF;
             min-width: 140px;
         }
-        div[data-testid="stVerticalBlock"]:has(div[data-testid="stDownloadButton"]) {
-            align-items: flex-end;
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) {
+            display: flex;
+            flex-direction: row;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) > div[data-testid="stElementContainer"]:has(div[data-testid="stSelectbox"]) {
+            flex: 0 0 170px;
+            width: 170px;
+            min-width: 170px;
+            max-width: 170px;
+            margin-bottom: 0;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) > div[data-testid="stElementContainer"]:has(div[data-testid="stDownloadButton"]) {
+            flex: 0 0 auto;
+            margin-bottom: 0;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stSelectbox"] label,
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stSelectbox"] [data-baseweb="select"] *,
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stSelectbox"] [data-baseweb="select"] input {
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stSelectbox"] [data-baseweb="select"] svg {
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
         }
         div[data-testid="stDownloadButton"] {
             display: flex;
@@ -422,30 +526,28 @@ def main() -> None:
         delta_symbol = symbol(delta) if not pd.isna(delta) else symbol(pct)
         return f"{main}\n{delta_symbol} {delta_str} ({pct_str})"
 
-    for account in account_filter:
-        account_df = filtered[filtered["account"] == account]
-        if account_df.empty:
-            continue
-
-        col_left, col_right = st.columns([6, 2])
-        with col_left:
-            st.markdown(f"**Account:** {account} (in USD)")
-
+    def build_account_matrix(account_df: pd.DataFrame):
         service_rows = account_df.set_index("service")
         if service_rows.index.has_duplicates:
             service_rows = service_rows.groupby(level=0).first()
 
         if "mtd" in service_rows.columns:
-            services = (
+            service_order = (
                 service_rows["mtd"]
                 .sort_values(ascending=False, na_position="last")
                 .index.tolist()
             )
         else:
-            services = sorted(account_df["service"].dropna().unique().tolist())
+            service_order = sorted(account_df["service"].dropna().unique().tolist())
 
         totals = build_total_series(account_df, metric_cols)
+        return service_rows, service_order, totals
 
+    def build_download_df(account_df: pd.DataFrame) -> pd.DataFrame:
+        if account_df.empty:
+            return pd.DataFrame(columns=["Metric", "Total"])
+
+        service_rows, service_order, totals = build_account_matrix(account_df)
         download_rows = []
         for metric, delta_col, pct_col in row_defs:
             label = row_labels.get(metric, metric)
@@ -455,7 +557,7 @@ def main() -> None:
                     totals.get(metric), totals.get(delta_col), totals.get(pct_col)
                 ),
             }
-            for service in services:
+            for service in service_order:
                 if service not in service_rows.index:
                     row_dict[service] = ""
                 else:
@@ -466,20 +568,100 @@ def main() -> None:
             download_rows.append(row_dict)
 
         download_df = pd.DataFrame(download_rows)
-        download_df = download_df[["Metric", "Total"] + services]
-        csv_bytes = download_df.to_csv(index=False).encode("utf-8")
-        with col_right:
+        return download_df[["Metric", "Total"] + service_order]
+
+    for account in account_filter:
+        current_account_df = filtered[filtered["account"] == account]
+        if current_account_df.empty:
+            continue
+
+        current_service_rows, current_services, current_totals = build_account_matrix(
+            current_account_df
+        )
+        account_months = month_anchors[month_anchors["account"] == account]
+        account_months = account_months.sort_values("month_start", ascending=False)
+
+        period_options = ["current"]
+        month_to_anchor = {}
+        if not account_months.empty:
+            latest_month = account_months.iloc[0]["month_start"]
+            previous_months = account_months[
+                account_months["month_start"] < latest_month
+            ]
+            for row in previous_months.itertuples(index=False):
+                month_key = row.month_start.isoformat()
+                period_options.append(f"month:{month_key}")
+                month_to_anchor[month_key] = row.anchor_date.isoformat()
+
+        def period_label(option: str) -> str:
+            if option == "current":
+                return "Stato attuale"
+            month_key = option.split(":", 1)[1]
+            month_start = pd.to_datetime(month_key, errors="coerce")
+            if pd.isna(month_start):
+                return option
+            return format_month_label(month_start.date())
+
+        st.markdown(f"**Account:** {account} (in USD)")
+
+        latest_update_text = "-"
+        if not account_months.empty:
+            latest_anchor_date = pd.to_datetime(
+                account_months.iloc[0]["anchor_date"], errors="coerce"
+            )
+            if not pd.isna(latest_anchor_date):
+                latest_update_text = latest_anchor_date.strftime("%d/%m/%Y")
+
+        toolbar_left, toolbar_right = st.columns([1, 1])
+        with toolbar_left:
+            st.markdown(
+                (
+                    '<div class="table-updated-at">'
+                    f"Dati aggiornati al: {html.escape(latest_update_text)}"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+
+        with toolbar_right:
+            selected_period = st.selectbox(
+                "",
+                options=period_options,
+                format_func=period_label,
+                key=f"csv-period-{account}",
+                label_visibility="collapsed",
+            )
+            if selected_period == "current":
+                download_df = build_download_df(current_account_df)
+                file_suffix = "stato_attuale"
+            else:
+                month_key = selected_period.split(":", 1)[1]
+                anchor_date = month_to_anchor.get(month_key)
+                if anchor_date:
+                    historical_df = load_data_for_anchor(
+                        db_name, table_name, anchor_date
+                    )
+                    historical_df = historical_df[
+                        (historical_df["account"] == account)
+                        & historical_df["service"].isin(service_filter)
+                    ]
+                    download_df = build_download_df(historical_df)
+                else:
+                    download_df = pd.DataFrame(columns=["Metric", "Total"])
+                file_suffix = month_key[:7]
+
+            csv_bytes = download_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Scarica CSV",
                 data=csv_bytes,
-                file_name=f"costs_{account}.csv",
+                file_name=f"costs_{account}_{file_suffix}.csv",
                 mime="text/csv",
             )
 
         header_cells = [
             '<th class="metric-col">Metric (MTD)</th>',
             '<th class="total-col">Total</th>',
-        ] + [f"<th>{html.escape(service)}</th>" for service in services]
+        ] + [f"<th>{html.escape(service)}</th>" for service in current_services]
         header_row = f"<tr>{''.join(header_cells)}</tr>"
 
         body_rows = []
@@ -487,9 +669,9 @@ def main() -> None:
             label = html.escape(row_labels.get(metric, metric))
             invert_colors = True
             total_cell = format_cell(
-                totals.get(metric),
-                totals.get(delta_col),
-                totals.get(pct_col),
+                current_totals.get(metric),
+                current_totals.get(delta_col),
+                current_totals.get(pct_col),
                 invert_colors=invert_colors,
             )
             row_classes = []
@@ -507,11 +689,11 @@ def main() -> None:
                 f'<th class="metric-col">{label}</th>',
                 f'<td class="total-col">{total_cell}</td>',
             ]
-            for service in services:
-                if service not in service_rows.index:
+            for service in current_services:
+                if service not in current_service_rows.index:
                     cell = ""
                 else:
-                    row = service_rows.loc[service]
+                    row = current_service_rows.loc[service]
                     cell = format_cell(
                         row.get(metric),
                         row.get(delta_col),
