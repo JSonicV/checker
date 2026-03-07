@@ -68,21 +68,19 @@ class AwsCostsClient:
             for group in day["Groups"]:
                 service = group["Keys"][0]
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if amount > 0:
-                    total += amount
-                    match format:
-                        case "dict":
-                            records.append(
-                                {
-                                    "date": date,
-                                    "account": self.account,
-                                    "service": service,
-                                    "amount": amount,
-                                }
-                            )
-                        case "tuple":
-                            # print((date, ACCOUNT, service, amount))
-                            records.append((date, self.account, service, amount))
+                total += amount
+                match format:
+                    case "dict":
+                        records.append(
+                            {
+                                "date": date,
+                                "account": self.account,
+                                "service": service,
+                                "amount": amount,
+                            }
+                        )
+                    case "tuple":
+                        records.append((date, self.account, service, amount))
 
         print(total)
         return records
