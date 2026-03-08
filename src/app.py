@@ -12,6 +12,10 @@ from duckdb_client import get_duckdb_client
 
 DEFAULT_DB_NAME = os.environ.get("DUCKDB_DATABASE", "database.duckdb")
 DEFAULT_TABLE = os.environ.get("DUCKDB_TABLE", "costs")
+DEFAULT_POD_TABLE = os.environ.get("DUCKDB_POD_TABLE", "pod_monthly_trend")
+PAGE_COSTS = "Costi"
+PAGE_POD = "Pod"
+NAV_PAGE_KEY = "active_page"
 MONTH_NAMES_IT = {
     1: "gennaio",
     2: "febbraio",
@@ -48,6 +52,12 @@ def load_data_for_anchor(db_name: str, table_name: str, anchor_date: str):
 def load_available_month_anchors(db_name: str, table_name: str):
     client = get_duckdb_client(db_name)
     return client.get_available_month_anchors(table_name)
+
+
+@st.cache_data(show_spinner=False)
+def load_pod_data(db_name: str, table_name: str, months: int = 12):
+    client = get_duckdb_client(db_name)
+    return client.get_pod_monthly_trend(table_name, months=months)
 
 
 def safe_div(numerator, denominator):
@@ -123,12 +133,406 @@ def format_month_label(month_start) -> str:
     return f"{MONTH_NAMES_IT[month_start.month].capitalize()} {month_start.year}"
 
 
+def inject_navigation_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        html, body, .stApp {
+            background-color: #ECEFF3;
+            color: #1F2933;
+        }
+        .stApp h1,
+        .stApp h2,
+        .stApp h3,
+        .stApp p,
+        .stApp label,
+        .stApp li {
+            color: #1F2933;
+        }
+        section[data-testid="stSidebar"] {
+            position: relative;
+            background-color: #ECEFF3 !important;
+            color: #1F2933;
+        }
+        section[data-testid="stSidebar"] > div {
+            background-color: #ECEFF3 !important;
+            box-shadow: 8px 0 20px rgba(15, 23, 42, 0.16);
+            border-right: 1px solid #D6DCE4;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button {
+            border-radius: 10px;
+            min-height: 42px;
+            border: 1px solid #BFC5CD !important;
+            background: #FFFFFF !important;
+            color: #1F2933 !important;
+            font-weight: 600;
+            transition: none;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button *,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button span {
+            color: inherit !important;
+            fill: currentColor !important;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="secondary"] {
+            background: #FFFFFF !important;
+            color: #1F2933 !important;
+            border-color: #BFC5CD !important;
+            transition: background-color 0.18s ease-in-out, border-color 0.18s ease-in-out, color 0.18s ease-in-out;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="secondary"]:hover {
+            border-color: #8D99A8 !important;
+            background: #EEF2F6 !important;
+            color: #1F2933 !important;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"] {
+            background: #1F2933 !important;
+            border-color: #1F2933 !important;
+            color: #FFFFFF !important;
+            transition: none !important;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"]:hover {
+            background: #1F2933 !important;
+            border-color: #1F2933 !important;
+            color: #FFFFFF !important;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"] *,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"] span {
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="secondary"] *,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="secondary"] span {
+            color: #1F2933 !important;
+            fill: #1F2933 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_navigation() -> str:
+    if NAV_PAGE_KEY not in st.session_state:
+        st.session_state[NAV_PAGE_KEY] = PAGE_COSTS
+
+    active_page = st.session_state[NAV_PAGE_KEY]
+
+    st.sidebar.markdown("### Pagine")
+    costs_clicked = st.sidebar.button(
+        PAGE_COSTS,
+        key="nav-costs",
+        width="stretch",
+        type="primary" if active_page == PAGE_COSTS else "secondary",
+    )
+    pod_clicked = st.sidebar.button(
+        PAGE_POD,
+        key="nav-pod",
+        width="stretch",
+        type="primary" if active_page == PAGE_POD else "secondary",
+    )
+
+    new_page = active_page
+    if costs_clicked:
+        new_page = PAGE_COSTS
+    elif pod_clicked:
+        new_page = PAGE_POD
+
+    if new_page != active_page:
+        st.session_state[NAV_PAGE_KEY] = new_page
+        st.rerun()
+
+    return new_page
+
+
 def main() -> None:
     st.set_page_config(page_title="AWS Costs Dashboard", layout="wide")
+    inject_navigation_styles()
+    selected_page = render_sidebar_navigation()
+
+    if selected_page == PAGE_POD:
+        st.title("Pod")
+        db_path = get_db_path(DEFAULT_DB_NAME)
+        if not db_path.exists():
+            st.error(f"File DuckDB non trovato: {db_path}")
+            return
+
+        try:
+            pod_df = load_pod_data(DEFAULT_DB_NAME, DEFAULT_POD_TABLE, months=12)
+        except Exception:
+            st.info(
+                "Tabella pod non disponibile. Esegui `python3 src/pod_collector.py` "
+                "per generare i dati mock."
+            )
+            return
+
+        if pod_df.empty:
+            st.info("Nessun dato pod disponibile negli ultimi 12 mesi.")
+            return
+
+        pod_df["month_start"] = pd.to_datetime(
+            pod_df["month_start"], errors="coerce"
+        ).dt.to_period("M").dt.to_timestamp()
+        pod_df["total_pods"] = pd.to_numeric(pod_df["total_pods"], errors="coerce")
+        pod_df = pod_df.dropna(subset=["month_start", "tenant", "total_pods"])
+        if pod_df.empty:
+            st.info("Dati pod non validi.")
+            return
+
+        tenant_month = (
+            pod_df.groupby(["month_start", "tenant"], as_index=False)["total_pods"]
+            .max()
+            .sort_values("month_start")
+        )
+        if tenant_month.empty:
+            st.info("Nessun dato pod aggregabile.")
+            return
+
+        latest_month = tenant_month["month_start"].max()
+        months_asc = pd.date_range(end=latest_month, periods=12, freq="MS")
+        months_desc = list(months_asc[::-1])
+        tenants = sorted(tenant_month["tenant"].unique().tolist())
+
+        matrix = tenant_month.pivot(
+            index="month_start",
+            columns="tenant",
+            values="total_pods",
+        ).reindex(index=months_asc, columns=tenants)
+        matrix = matrix.ffill().fillna(0)
+
+        total_series = matrix.sum(axis=1)
+        total_prev = total_series.shift(1)
+        total_delta = total_series - total_prev
+        total_pct = pd.Series(
+            [safe_div(curr - prev, prev) for curr, prev in zip(total_series, total_prev)],
+            index=total_series.index,
+        )
+
+        tenant_delta = {}
+        tenant_pct = {}
+        for tenant in tenants:
+            series = matrix[tenant]
+            prev = series.shift(1)
+            tenant_delta[tenant] = series - prev
+            tenant_pct[tenant] = pd.Series(
+                [safe_div(curr - prev_value, prev_value) for curr, prev_value in zip(series, prev)],
+                index=series.index,
+            )
+
+        def format_number(num, decimals=0, sign=False):
+            if pd.isna(num):
+                return ""
+            fmt = f"{'+' if sign else ''},.{decimals}f"
+            raw = format(num, fmt)
+            return raw.replace(",", "X").replace(".", ",").replace("X", ".")
+
+        def get_trend_class(delta_value, pct_value):
+            if not pd.isna(pct_value):
+                if pct_value < 0:
+                    return "neg"
+                if pct_value > 0:
+                    return "pos"
+                return ""
+            if pd.isna(delta_value):
+                return ""
+            if delta_value < 0:
+                return "neg"
+            if delta_value > 0:
+                return "pos"
+            return ""
+
+        def format_pod_cell(value, delta, pct):
+            main = format_number(value, decimals=0)
+            if not main:
+                return ""
+
+            trend_class = get_trend_class(delta, pct)
+            symbol_html = (
+                f'<span class="sym {trend_class}">●</span>'
+                if trend_class
+                else '<span class="sym">●</span>'
+            )
+            delta_str = format_number(delta, decimals=0, sign=True) if not pd.isna(delta) else ""
+            pct_str = (
+                f"{format_number(pct * 100, decimals=1, sign=True)}%"
+                if not pd.isna(pct)
+                else ""
+            )
+            if not delta_str and not pct_str:
+                return f'<div class="cell"><div class="main">{main}</div></div>'
+
+            if trend_class:
+                delta_html = (
+                    f'<span class="{trend_class}">{delta_str}</span>' if delta_str else ""
+                )
+                pct_html = f'<span class="{trend_class}">{pct_str}</span>' if pct_str else ""
+            else:
+                delta_html = f"<span>{delta_str}</span>" if delta_str else ""
+                pct_html = f"<span>{pct_str}</span>" if pct_str else ""
+
+            sub_parts = []
+            if delta_html:
+                sub_parts.append(delta_html)
+            if pct_html:
+                sub_parts.append(f"({pct_html})")
+            sub_html = " ".join(sub_parts)
+
+            return (
+                '<div class="cell">'
+                f'<div class="main">{symbol_html} {main}</div>'
+                f'<div class="sub">{sub_html}</div>'
+                "</div>"
+            )
+
+        st.markdown(
+            """
+            <style>
+            .pod-table-wrap {
+                overflow-x: auto;
+                max-width: 100%;
+                box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+                border-radius: 12px;
+            }
+            table.pod-table {
+                border-collapse: separate;
+                border-spacing: 0;
+                width: max-content;
+                min-width: 100%;
+                background: #ECEFF3;
+                border-radius: 12px;
+            }
+            table.pod-table th,
+            table.pod-table td {
+                padding: 8px 10px;
+                border-bottom: 1px solid #ECEFF3;
+                color: #1F2933;
+                vertical-align: top;
+                white-space: nowrap;
+                background: #ECEFF3;
+                text-align: right;
+                border-right: 1px solid #BFC5CD;
+            }
+            table.pod-table th {
+                font-weight: 600;
+                color: #6B7280;
+            }
+            table.pod-table th.month-col,
+            table.pod-table td.month-col {
+                position: sticky;
+                left: 0;
+                z-index: 3;
+                background: #FFFFFF;
+                min-width: 190px;
+                text-align: left;
+            }
+            table.pod-table th.total-col,
+            table.pod-table td.total-col {
+                position: sticky;
+                left: 190px;
+                z-index: 2;
+                background: #FFFFFF;
+                min-width: 150px;
+            }
+            table.pod-table td .cell {
+                white-space: normal;
+                line-height: 1.45;
+            }
+            table.pod-table td .main {
+                font-size: 15px;
+                font-weight: 600;
+                color: #1F2933;
+            }
+            table.pod-table td .sub {
+                font-size: 12px;
+                font-weight: 500;
+                color: #6B7280;
+                margin-top: 4px;
+            }
+            table.pod-table td .sym {
+                font-size: 15px;
+                line-height: 1;
+                color: #6B7280;
+            }
+            table.pod-table td .sym.pos {
+                color: #E06C75;
+            }
+            table.pod-table td .sym.neg {
+                color: #3BA776;
+            }
+            table.pod-table td .sub .pos {
+                color: inherit;
+            }
+            table.pod-table td .sub .neg {
+                color: inherit;
+            }
+            table.pod-table tr.row-white td,
+            table.pod-table tr.row-white th {
+                background: #FFFFFF;
+            }
+            table.pod-table tr.row-white th.month-col,
+            table.pod-table tr.row-white td.month-col,
+            table.pod-table tr.row-white th.total-col,
+            table.pod-table tr.row-white td.total-col {
+                background: #FFFFFF;
+            }
+            table.pod-table tr.row-grey td,
+            table.pod-table tr.row-grey th {
+                background: #ECEFF3;
+            }
+            table.pod-table tr.row-grey th.month-col,
+            table.pod-table tr.row-grey td.month-col,
+            table.pod-table tr.row-grey th.total-col,
+            table.pod-table tr.row-grey td.total-col {
+                background: #FFFFFF;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        header_cells = [
+            '<th class="month-col">Mese</th>',
+            '<th class="total-col">Total</th>',
+        ] + [f"<th>{html.escape(tenant)}</th>" for tenant in tenants]
+        header_row = f"<tr>{''.join(header_cells)}</tr>"
+
+        body_rows = []
+        for idx, month_value in enumerate(months_desc):
+            row_class = "row-white" if idx % 2 == 0 else "row-grey"
+            month_label = html.escape(format_month_label(month_value.date()))
+
+            row_cells = [
+                f'<th class="month-col">{month_label}</th>',
+                (
+                    '<td class="total-col">'
+                    f"{format_pod_cell(total_series.at[month_value], total_delta.at[month_value], total_pct.at[month_value])}"
+                    "</td>"
+                ),
+            ]
+
+            for tenant in tenants:
+                row_cells.append(
+                    "<td>"
+                    f"{format_pod_cell(matrix.at[month_value, tenant], tenant_delta[tenant].at[month_value], tenant_pct[tenant].at[month_value])}"
+                    "</td>"
+                )
+
+            body_rows.append(f'<tr class="{row_class}">{"".join(row_cells)}</tr>')
+
+        table_html = (
+            '<div class="pod-table-wrap">'
+            '<table class="pod-table">'
+            f"<thead>{header_row}</thead>"
+            f"<tbody>{''.join(body_rows)}</tbody>"
+            "</table>"
+            "</div>"
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
+        return
+
     st.title("AWS Costs Dashboard")
 
-    db_name = st.sidebar.text_input("DuckDB file", DEFAULT_DB_NAME)
-    table_name = st.sidebar.text_input("Table name", DEFAULT_TABLE)
+    db_name = DEFAULT_DB_NAME
+    table_name = DEFAULT_TABLE
 
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
         st.error("Table name non valido.")
@@ -160,37 +564,10 @@ def main() -> None:
         )
 
     accounts = sorted(df["account"].dropna().unique().tolist())
-    service_names = sorted(df["service"].dropna().unique().tolist())
-
-    account_filter = st.sidebar.multiselect("Account", accounts, default=accounts)
-    service_filter = st.sidebar.multiselect(
-        "Service", service_names, default=service_names
-    )
-
-    filtered = df[
-        df["account"].isin(account_filter) & df["service"].isin(service_filter)
-    ]
 
     st.markdown(
         """
         <style>
-        html, body, .stApp {
-            background-color: #ECEFF3;
-            color: #1F2933;
-        }
-        .stApp h1,
-        .stApp h2,
-        .stApp h3,
-        .stApp p,
-        .stApp label,
-        .stApp span,
-        .stApp div,
-        .stApp li {
-            color: #1F2933;
-        }
-        .stSidebar {
-            color: #1F2933;
-        }
         .table-wrap {
             overflow-x: auto;
             max-width: 100%;
@@ -426,7 +803,7 @@ def main() -> None:
     )
 
     metric_cols = [
-        col for col in filtered.columns if col not in {"date", "account", "service"}
+        col for col in df.columns if col not in {"date", "account", "service"}
     ]
     if not metric_cols:
         st.info("Nessuna metrica disponibile.")
@@ -664,8 +1041,8 @@ def main() -> None:
 
         return columns, value_rows, pct_rows
 
-    for account in account_filter:
-        base_account_df = filtered[filtered["account"] == account]
+    for account in accounts:
+        base_account_df = df[df["account"] == account]
         if base_account_df.empty:
             continue
 
@@ -719,8 +1096,7 @@ def main() -> None:
                         db_name, table_name, selected_anchor_date
                     )
                     selected_account_df = historical_df[
-                        (historical_df["account"] == account)
-                        & historical_df["service"].isin(service_filter)
+                        historical_df["account"] == account
                     ]
                 else:
                     selected_account_df = pd.DataFrame(columns=base_account_df.columns)
@@ -767,8 +1143,8 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
-        selected_service_rows, selected_services, selected_totals = build_account_matrix(
-            selected_account_df
+        selected_service_rows, selected_services, selected_totals = (
+            build_account_matrix(selected_account_df)
         )
 
         header_cells = [

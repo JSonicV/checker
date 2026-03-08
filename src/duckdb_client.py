@@ -18,6 +18,19 @@ class DuckDBClient:
             )
         """)
 
+    def create_pod_trend_table(self, table_name):
+        self.conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                month_start DATE,
+                tenant VARCHAR,
+                source_backend VARCHAR,
+                monthly_delta BIGINT,
+                total_pods BIGINT,
+                updated_at TIMESTAMP,
+                UNIQUE(month_start, tenant)
+            )
+        """)
+
     def execute(self, query, params=None):
         if params is None:
             return self.conn.execute(query).df()
@@ -35,6 +48,11 @@ class DuckDBClient:
         else:
             query = f"SELECT MAX(date) as latest_date FROM {table_name}"
             df = self.execute(query)
+        return None if pd.isna(df.iloc[0, 0]) else df.iloc[0, 0]
+
+    def get_latest_month(self, table_name):
+        query = f"SELECT MAX(month_start) as latest_month FROM {table_name}"
+        df = self.execute(query)
         return None if pd.isna(df.iloc[0, 0]) else df.iloc[0, 0]
 
     def insert_many(self, table_name, values):
@@ -215,6 +233,24 @@ class DuckDBClient:
             FROM {table_name}
             GROUP BY account, date_trunc('month', date)
             ORDER BY account, month_start DESC;
+        """
+        return self.execute(query)
+
+    def get_pod_monthly_trend(self, table_name, months=12):
+        query = f"""
+            SELECT
+                month_start,
+                tenant,
+                source_backend,
+                monthly_delta,
+                total_pods,
+                updated_at
+            FROM {table_name}
+            WHERE month_start >= CAST(
+                date_trunc('month', current_date) - INTERVAL '{months - 1} months'
+                AS DATE
+            )
+            ORDER BY month_start, tenant;
         """
         return self.execute(query)
 
