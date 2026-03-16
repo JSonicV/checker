@@ -31,6 +31,7 @@ except ModuleNotFoundError:
 DEFAULT_DB_NAME = os.environ.get("DUCKDB_DATABASE", "database.duckdb")
 DEFAULT_COSTS_TABLE = os.environ.get("DUCKDB_TABLE", "costs")
 DEFAULT_POD_TABLE = os.environ.get("DUCKDB_POD_TABLE", "pod_monthly_trend")
+DEFAULT_POD_DAILY_TABLE = os.environ.get("DUCKDB_POD_DAILY_TABLE", "pod_daily_trend")
 
 
 def main() -> None:
@@ -40,7 +41,7 @@ def main() -> None:
     selected_page = render_sidebar_navigation()
 
     if selected_page == PAGE_POD:
-        render_pod_page(DEFAULT_DB_NAME, DEFAULT_POD_TABLE)
+        render_pod_page(DEFAULT_DB_NAME, DEFAULT_POD_TABLE, DEFAULT_POD_DAILY_TABLE)
         return
 
     if selected_page == PAGE_COSTS:

@@ -31,6 +31,19 @@ class DuckDBClient:
             )
         """)
 
+    def create_pod_daily_trend_table(self, table_name):
+        self.conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                date DATE,
+                tenant VARCHAR,
+                source_backend VARCHAR,
+                daily_delta BIGINT,
+                total_pods BIGINT,
+                updated_at TIMESTAMP,
+                UNIQUE(date, tenant)
+            )
+        """)
+
     def execute(self, query, params=None):
         if params is None:
             return self.conn.execute(query).df()
@@ -251,6 +264,21 @@ class DuckDBClient:
                 AS DATE
             )
             ORDER BY month_start, tenant;
+        """
+        return self.execute(query)
+
+    def get_pod_daily_trend(self, table_name, days=60):
+        query = f"""
+            SELECT
+                date,
+                tenant,
+                source_backend,
+                daily_delta,
+                total_pods,
+                updated_at
+            FROM {table_name}
+            WHERE date >= CAST(current_date - INTERVAL '{days - 1} days' AS DATE)
+            ORDER BY date, tenant;
         """
         return self.execute(query)
 

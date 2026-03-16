@@ -72,10 +72,16 @@ def inject_styles() -> None:
             color: #6B7280;
         }
         table.pod-table td .sym.pos {
-            color: #E06C75;
+            color: #3BA776;
         }
         table.pod-table td .sym.neg {
-            color: #3BA776;
+            color: #E06C75;
+        }
+        table.pod-table tr.row-white td .sym.neutral {
+            color: #BFC5CD;
+        }
+        table.pod-table tr.row-grey td .sym.neutral {
+            color: #FFFFFF;
         }
         table.pod-table td .sub .pos {
             color: inherit;
@@ -101,7 +107,11 @@ def inject_styles() -> None:
         table.pod-table tr.row-grey td.month-col,
         table.pod-table tr.row-grey th.total-col,
         table.pod-table tr.row-grey td.total-col {
-            background: #FFFFFF;
+            background: #ECEFF3;
+        }
+        table.pod-table tr.row-grey td,
+        table.pod-table tr.row-grey th {
+            border-bottom-color: #FFFFFF;
         }
         </style>
         """,

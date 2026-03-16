@@ -58,6 +58,7 @@ service_map = {
     "Amazon Route 53": "Route 53",
     "Amazon Simple Notification Service": "SNS",
     "Amazon Simple Storage Service": "S3",
+    "Amazon Simple Queue Service": "SQS",
     "Amazon Timestream": "Timestream",
     "Amazon Virtual Private Cloud": "VPC",
     "AmazonCloudWatch": "CloudWatch",
