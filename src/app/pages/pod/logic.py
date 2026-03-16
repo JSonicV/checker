@@ -188,10 +188,16 @@ def build_table_state(
 
     last_30_days = _build_last_days_row(pod_daily_df, tenants, window_days=30)
     if last_30_days is not None:
+        current_month_values = matrix.loc[latest_month].to_dict()
         tenants = sorted(
             tenants,
             key=lambda tenant: (
                 -last_30_days.tenant_delta.get(tenant, 0.0),
+                -(
+                    float(current_month_values.get(tenant))
+                    if pd.notna(current_month_values.get(tenant))
+                    else float("-inf")
+                ),
                 tenant.casefold(),
             ),
         )
