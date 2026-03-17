@@ -4,29 +4,41 @@ import pandas as pd
 import streamlit as st
 
 from duckdb_client import get_duckdb_client
+
 try:
     from app.page_shared import safe_div
 except ModuleNotFoundError:
     from page_shared import safe_div
 
 
+POD_METRIC_COLUMNS = {
+    "total": "total_pods",
+    "onboarded": "onboarded_pods",
+}
+
+
 @dataclass
 class PodWindowRow:
     label: str
     total_value: float
+    total_reference_value: float
     total_delta: float
     total_pct: float | object
     tenant_value: dict[str, float]
+    tenant_reference_value: dict[str, float]
     tenant_delta: dict[str, float]
     tenant_pct: dict[str, float | object]
 
 
 @dataclass
 class PodTableState:
+    metric: str
     months_desc: list[pd.Timestamp]
     tenants: list[str]
     matrix: pd.DataFrame
+    reference_matrix: pd.DataFrame
     total_series: pd.Series
+    total_reference_series: pd.Series
     total_delta: pd.Series
     total_pct: pd.Series
     tenant_delta: dict[str, pd.Series]
@@ -46,38 +58,58 @@ def load_daily_data(db_name: str, table_name: str, days: int = 60):
     return client.get_pod_daily_trend(table_name, days=days)
 
 
+def _resolve_metric_column(metric: str) -> str:
+    try:
+        return POD_METRIC_COLUMNS[metric]
+    except KeyError as exc:
+        raise ValueError(f"Metrica pod non supportata: {metric}") from exc
+
+
 def _normalize_monthly_df(pod_monthly_df: pd.DataFrame) -> pd.DataFrame:
     pod_monthly_df = pod_monthly_df.copy()
     pod_monthly_df["month_start"] = pd.to_datetime(
         pod_monthly_df["month_start"], errors="coerce"
     ).dt.to_period("M").dt.to_timestamp()
-    pod_monthly_df["total_pods"] = pd.to_numeric(
-        pod_monthly_df["total_pods"], errors="coerce"
-    )
+    for column in ("total_pods", "onboarded_pods"):
+        if column not in pod_monthly_df.columns:
+            pod_monthly_df[column] = pd.NA
+        pod_monthly_df[column] = pd.to_numeric(pod_monthly_df[column], errors="coerce")
     return pod_monthly_df.dropna(subset=["month_start", "tenant", "total_pods"])
 
 
 def _normalize_daily_df(pod_daily_df: pd.DataFrame) -> pd.DataFrame:
     if pod_daily_df is None or pod_daily_df.empty:
-        return pd.DataFrame(columns=["date", "tenant", "total_pods"])
+        return pd.DataFrame(
+            columns=["date", "tenant", "total_pods", "onboarded_pods"]
+        )
 
     pod_daily_df = pod_daily_df.copy()
-    pod_daily_df["date"] = pd.to_datetime(pod_daily_df["date"], errors="coerce").dt.normalize()
-    pod_daily_df["total_pods"] = pd.to_numeric(pod_daily_df["total_pods"], errors="coerce")
+    pod_daily_df["date"] = pd.to_datetime(
+        pod_daily_df["date"], errors="coerce"
+    ).dt.normalize()
+    for column in ("total_pods", "onboarded_pods"):
+        if column not in pod_daily_df.columns:
+            pod_daily_df[column] = pd.NA
+        pod_daily_df[column] = pd.to_numeric(pod_daily_df[column], errors="coerce")
     return pod_daily_df.dropna(subset=["date", "tenant", "total_pods"])
 
 
 def _build_last_days_row(
     pod_daily_df: pd.DataFrame,
     tenants: list[str],
+    value_column: str,
     window_days: int = 30,
     label: str = "Ultimi 30 giorni",
 ) -> PodWindowRow | None:
     if pod_daily_df.empty:
         return None
 
+    columns = ["total_pods"]
+    if value_column != "total_pods":
+        columns.append(value_column)
+
     tenant_date = (
-        pod_daily_df.groupby(["date", "tenant"], as_index=False)["total_pods"]
+        pod_daily_df.groupby(["date", "tenant"], as_index=False)[columns]
         .max()
         .sort_values("date")
     )
@@ -87,9 +119,16 @@ def _build_last_days_row(
     daily_matrix = tenant_date.pivot(
         index="date",
         columns="tenant",
+        values=value_column,
+    ).sort_index()
+    reference_matrix = tenant_date.pivot(
+        index="date",
+        columns="tenant",
         values="total_pods",
     ).sort_index()
+
     daily_matrix = daily_matrix.reindex(columns=tenants).ffill().fillna(0)
+    reference_matrix = reference_matrix.reindex(columns=tenants).ffill().fillna(0)
     if daily_matrix.empty:
         return None
 
@@ -97,6 +136,7 @@ def _build_last_days_row(
     baseline_date = latest_date - pd.Timedelta(days=window_days)
 
     current_values = daily_matrix.loc[latest_date]
+    current_reference_values = reference_matrix.loc[latest_date]
     baseline_slice = daily_matrix[daily_matrix.index <= baseline_date]
     if baseline_slice.empty:
         baseline_values = pd.Series(0, index=tenants, dtype="float64")
@@ -113,6 +153,7 @@ def _build_last_days_row(
     )
 
     total_value = float(current_values.sum())
+    total_reference_value = float(current_reference_values.sum())
     total_baseline = float(baseline_values.sum())
     total_delta = total_value - total_baseline
     total_pct = safe_div(total_delta, total_baseline)
@@ -120,9 +161,13 @@ def _build_last_days_row(
     return PodWindowRow(
         label=label,
         total_value=total_value,
+        total_reference_value=total_reference_value,
         total_delta=total_delta,
         total_pct=total_pct,
         tenant_value={tenant: float(current_values.at[tenant]) for tenant in tenants},
+        tenant_reference_value={
+            tenant: float(current_reference_values.at[tenant]) for tenant in tenants
+        },
         tenant_delta={tenant: float(delta_values.at[tenant]) for tenant in tenants},
         tenant_pct={tenant: pct_values.at[tenant] for tenant in tenants},
     )
@@ -132,14 +177,25 @@ def build_table_state(
     pod_monthly_df: pd.DataFrame,
     pod_daily_df: pd.DataFrame | None = None,
     months: int = 12,
+    metric: str = "total",
 ) -> PodTableState | None:
+    value_column = _resolve_metric_column(metric)
     pod_monthly_df = _normalize_monthly_df(pod_monthly_df)
     if pod_monthly_df.empty:
         return None
+    pod_monthly_df = pod_monthly_df.dropna(subset=[value_column])
+    if pod_monthly_df.empty:
+        return None
+
     pod_daily_df = _normalize_daily_df(pod_daily_df)
+    pod_daily_df = pod_daily_df.dropna(subset=[value_column])
+
+    columns = ["total_pods"]
+    if value_column != "total_pods":
+        columns.append(value_column)
 
     tenant_month = (
-        pod_monthly_df.groupby(["month_start", "tenant"], as_index=False)["total_pods"]
+        pod_monthly_df.groupby(["month_start", "tenant"], as_index=False)[columns]
         .max()
         .sort_values("month_start")
     )
@@ -160,11 +216,19 @@ def build_table_state(
     matrix = tenant_month.pivot(
         index="month_start",
         columns="tenant",
-        values="total_pods",
+        values=value_column,
     ).reindex(index=months_asc, columns=tenants)
     matrix = matrix.ffill()
 
+    reference_matrix = tenant_month.pivot(
+        index="month_start",
+        columns="tenant",
+        values="total_pods",
+    ).reindex(index=months_asc, columns=tenants)
+    reference_matrix = reference_matrix.ffill()
+
     total_series = matrix.sum(axis=1)
+    total_reference_series = reference_matrix.sum(axis=1)
     total_prev = total_series.shift(1)
     total_delta = total_series - total_prev
     total_pct = pd.Series(
@@ -186,13 +250,18 @@ def build_table_state(
             index=series.index,
         )
 
-    last_30_days = _build_last_days_row(pod_daily_df, tenants, window_days=30)
-    if last_30_days is not None:
-        current_month_values = matrix.loc[latest_month].to_dict()
+    ordering_last_30_days = _build_last_days_row(
+        pod_daily_df,
+        tenants,
+        value_column="total_pods",
+        window_days=30,
+    )
+    if ordering_last_30_days is not None:
+        current_month_values = reference_matrix.loc[latest_month].to_dict()
         tenants = sorted(
             tenants,
             key=lambda tenant: (
-                -last_30_days.tenant_delta.get(tenant, 0.0),
+                -ordering_last_30_days.tenant_delta.get(tenant, 0.0),
                 -(
                     float(current_month_values.get(tenant))
                     if pd.notna(current_month_values.get(tenant))
@@ -202,12 +271,23 @@ def build_table_state(
             ),
         )
         matrix = matrix.reindex(columns=tenants)
+        reference_matrix = reference_matrix.reindex(columns=tenants)
+
+    last_30_days = _build_last_days_row(
+        pod_daily_df,
+        tenants,
+        value_column=value_column,
+        window_days=30,
+    )
 
     return PodTableState(
+        metric=metric,
         months_desc=months_desc,
         tenants=tenants,
         matrix=matrix,
+        reference_matrix=reference_matrix,
         total_series=total_series,
+        total_reference_series=total_reference_series,
         total_delta=total_delta,
         total_pct=total_pct,
         tenant_delta=tenant_delta,

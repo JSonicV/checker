@@ -26,6 +26,8 @@ class DuckDBClient:
                 source_backend VARCHAR,
                 monthly_delta BIGINT,
                 total_pods BIGINT,
+                monthly_onboarded_delta BIGINT,
+                onboarded_pods BIGINT,
                 updated_at TIMESTAMP,
                 UNIQUE(month_start, tenant)
             )
@@ -39,6 +41,8 @@ class DuckDBClient:
                 source_backend VARCHAR,
                 daily_delta BIGINT,
                 total_pods BIGINT,
+                daily_onboarded_delta BIGINT,
+                onboarded_pods BIGINT,
                 updated_at TIMESTAMP,
                 UNIQUE(date, tenant)
             )
@@ -257,6 +261,8 @@ class DuckDBClient:
                 source_backend,
                 monthly_delta,
                 total_pods,
+                monthly_onboarded_delta,
+                onboarded_pods,
                 updated_at
             FROM {table_name}
             WHERE month_start >= CAST(
@@ -275,6 +281,8 @@ class DuckDBClient:
                 source_backend,
                 daily_delta,
                 total_pods,
+                daily_onboarded_delta,
+                onboarded_pods,
                 updated_at
             FROM {table_name}
             WHERE date >= CAST(current_date - INTERVAL '{days - 1} days' AS DATE)

@@ -27,7 +27,7 @@ POD_S3_PREFIX = os.environ.get("POD_S3_PREFIX", "daily_source_totals").strip("/"
 POD_SNAPSHOT_FILENAME = os.environ.get("POD_SNAPSHOT_FILENAME", "snapshots.json")
 POD_BOOTSTRAP_START_YEAR = int(os.environ.get("POD_BOOTSTRAP_START_YEAR", "2024"))
 PARTITION_YEAR_PATTERN = re.compile(r"(?:^|/)year=(\d{4})(?:/|$)")
-REQUIRED_SNAPSHOT_COLUMNS = ("date", "tenant", "source_backend", "pods")
+REQUIRED_SNAPSHOT_COLUMNS = ("date", "tenant", "source_backend", "pods", "onboarded")
 
 
 @dataclass(frozen=True)
@@ -237,6 +237,11 @@ def flatten_snapshot_payload(
                 raise ValueError(
                     f"Snapshot senza total/pods nel file '{source_path}' alla data '{raw_date}'."
                 )
+            onboarded_value = row.get("onboarded")
+            if onboarded_value is None:
+                raise ValueError(
+                    f"Snapshot senza onboarded nel file '{source_path}' alla data '{raw_date}'."
+                )
 
             numeric_total = pd.to_numeric(total_value, errors="coerce")
             if pd.isna(numeric_total):
@@ -251,6 +256,20 @@ def flatten_snapshot_payload(
                 raise ValueError(
                     f"Valore total/pods non intero nel file '{source_path}' alla data '{raw_date}'."
                 )
+            numeric_onboarded = pd.to_numeric(onboarded_value, errors="coerce")
+            if pd.isna(numeric_onboarded):
+                raise ValueError(
+                    f"Valore onboarded non numerico nel file '{source_path}' alla data '{raw_date}'."
+                )
+            if numeric_onboarded < 0:
+                raise ValueError(
+                    f"Valore onboarded negativo nel file '{source_path}' alla data '{raw_date}'."
+                )
+            if numeric_onboarded % 1 != 0:
+                raise ValueError(
+                    f"Valore onboarded non intero nel file '{source_path}' alla data '{raw_date}'."
+                )
+            numeric_onboarded = min(numeric_onboarded, numeric_total)
 
             records.append(
                 {
@@ -258,6 +277,7 @@ def flatten_snapshot_payload(
                     "tenant": str(raw_tenant).strip(),
                     "source_backend": source.source_key,
                     "pods": int(numeric_total),
+                    "onboarded": int(numeric_onboarded),
                 }
             )
 
@@ -293,7 +313,7 @@ def normalize_snapshot_df(snapshot_df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(
             "Colonne mancanti negli snapshot pod: "
             + ", ".join(missing)
-            + ". Attese: date, tenant, source_backend, pods."
+            + ". Attese: date, tenant, source_backend, pods, onboarded."
         )
 
     normalized = snapshot_df.loc[:, list(REQUIRED_SNAPSHOT_COLUMNS)].copy()
@@ -307,7 +327,10 @@ def normalize_snapshot_df(snapshot_df: pd.DataFrame) -> pd.DataFrame:
         normalized["source_backend"].astype("string").str.strip()
     )
     normalized["pods"] = pd.to_numeric(normalized["pods"], errors="coerce")
-    normalized = normalized.dropna(subset=["date", "tenant", "source_backend", "pods"])
+    normalized["onboarded"] = pd.to_numeric(normalized["onboarded"], errors="coerce")
+    normalized = normalized.dropna(
+        subset=["date", "tenant", "source_backend", "pods", "onboarded"]
+    )
     normalized = normalized[
         (normalized["tenant"] != "") & (normalized["source_backend"] != "")
     ]
@@ -316,16 +339,22 @@ def normalize_snapshot_df(snapshot_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=list(REQUIRED_SNAPSHOT_COLUMNS))
 
     normalized["pods"] = normalized["pods"].astype("int64")
+    normalized["onboarded"] = normalized["onboarded"].astype("int64")
+    normalized["onboarded"] = normalized[["onboarded", "pods"]].min(axis=1)
     normalized = normalized.sort_values(
         ["date", "tenant", "source_backend"]
     ).reset_index(drop=True)
 
     conflicts = (
-        normalized.groupby(["date", "tenant"], as_index=False)["pods"]
-        .nunique()
-        .rename(columns={"pods": "distinct_pods"})
+        normalized.groupby(["date", "tenant"], as_index=False)
+        .agg(
+            distinct_pods=("pods", "nunique"),
+            distinct_onboarded=("onboarded", "nunique"),
+        )
     )
-    conflicts = conflicts[conflicts["distinct_pods"] > 1]
+    conflicts = conflicts[
+        (conflicts["distinct_pods"] > 1) | (conflicts["distinct_onboarded"] > 1)
+    ]
     if not conflicts.empty:
         sample = conflicts.iloc[0]
         raise ValueError(
@@ -354,19 +383,28 @@ def build_daily_rows(
     snapshot_df: pd.DataFrame,
     updated_at: datetime,
     seed_totals: dict[str, int] | None = None,
+    seed_onboarded: dict[str, int] | None = None,
 ) -> list[tuple]:
     if snapshot_df.empty:
         return []
 
     seed_totals = seed_totals or {}
+    seed_onboarded = seed_onboarded or {}
     daily_df = snapshot_df.sort_values(["tenant", "date"]).copy()
-    previous_values = daily_df.groupby("tenant")["pods"].shift(1)
+    previous_total_values = daily_df.groupby("tenant")["pods"].shift(1)
+    previous_onboarded_values = daily_df.groupby("tenant")["onboarded"].shift(1)
 
     first_rows = daily_df.groupby("tenant").cumcount().eq(0)
-    previous_values.loc[first_rows] = (
+    previous_total_values.loc[first_rows] = (
         daily_df.loc[first_rows, "tenant"].map(seed_totals).fillna(0)
     )
-    daily_df["daily_delta"] = daily_df["pods"] - previous_values.fillna(0)
+    previous_onboarded_values.loc[first_rows] = (
+        daily_df.loc[first_rows, "tenant"].map(seed_onboarded).fillna(0)
+    )
+    daily_df["daily_delta"] = daily_df["pods"] - previous_total_values.fillna(0)
+    daily_df["daily_onboarded_delta"] = (
+        daily_df["onboarded"] - previous_onboarded_values.fillna(0)
+    )
 
     return [
         (
@@ -375,6 +413,8 @@ def build_daily_rows(
             row.source_backend,
             int(row.daily_delta),
             int(row.pods),
+            int(row.daily_onboarded_delta),
+            int(row.onboarded),
             updated_at,
         )
         for row in daily_df.itertuples(index=False)
@@ -385,11 +425,13 @@ def build_monthly_rows(
     snapshot_df: pd.DataFrame,
     updated_at: datetime,
     seed_totals: dict[str, int] | None = None,
+    seed_onboarded: dict[str, int] | None = None,
 ) -> list[tuple]:
     if snapshot_df.empty:
         return []
 
     seed_totals = seed_totals or {}
+    seed_onboarded = seed_onboarded or {}
     monthly_df = snapshot_df.sort_values(["tenant", "date"]).copy()
     monthly_df["month_start"] = monthly_df["date"].apply(month_start)
     monthly_df = (
@@ -399,12 +441,19 @@ def build_monthly_rows(
         .reset_index(drop=True)
     )
 
-    previous_values = monthly_df.groupby("tenant")["pods"].shift(1)
+    previous_total_values = monthly_df.groupby("tenant")["pods"].shift(1)
+    previous_onboarded_values = monthly_df.groupby("tenant")["onboarded"].shift(1)
     first_rows = monthly_df.groupby("tenant").cumcount().eq(0)
-    previous_values.loc[first_rows] = (
+    previous_total_values.loc[first_rows] = (
         monthly_df.loc[first_rows, "tenant"].map(seed_totals).fillna(0)
     )
-    monthly_df["monthly_delta"] = monthly_df["pods"] - previous_values.fillna(0)
+    previous_onboarded_values.loc[first_rows] = (
+        monthly_df.loc[first_rows, "tenant"].map(seed_onboarded).fillna(0)
+    )
+    monthly_df["monthly_delta"] = monthly_df["pods"] - previous_total_values.fillna(0)
+    monthly_df["monthly_onboarded_delta"] = (
+        monthly_df["onboarded"] - previous_onboarded_values.fillna(0)
+    )
 
     return [
         (
@@ -413,6 +462,8 @@ def build_monthly_rows(
             row.source_backend,
             int(row.monthly_delta),
             int(row.pods),
+            int(row.monthly_onboarded_delta),
+            int(row.onboarded),
             updated_at,
         )
         for row in monthly_df.itertuples(index=False)
@@ -437,15 +488,16 @@ def get_target_years(duckdb, current_year: int) -> tuple[list[int], bool]:
     return [current_year], False
 
 
-def get_previous_day_totals(
+def get_previous_day_values(
     duckdb,
     table_name: str,
     current_year_start: pd.Timestamp,
+    value_column: str,
 ) -> dict[str, int]:
     previous_day = (current_year_start - pd.Timedelta(days=1)).date()
     df = duckdb.execute(
         f"""
-        SELECT tenant, total_pods
+        SELECT tenant, {value_column} AS metric_value
         FROM {table_name}
         WHERE date = ?
         """,
@@ -453,18 +505,19 @@ def get_previous_day_totals(
     )
     if df.empty:
         return {}
-    return dict(zip(df["tenant"], df["total_pods"]))
+    return {tenant: int(value) for tenant, value in zip(df["tenant"], df["metric_value"])}
 
 
-def get_previous_month_totals(
+def get_previous_month_values(
     duckdb,
     table_name: str,
     current_year_month_start: pd.Timestamp,
+    value_column: str,
 ) -> dict[str, int]:
     previous_month = (current_year_month_start - pd.DateOffset(months=1)).date()
     df = duckdb.execute(
         f"""
-        SELECT tenant, total_pods
+        SELECT tenant, {value_column} AS metric_value
         FROM {table_name}
         WHERE month_start = ?
         """,
@@ -472,7 +525,7 @@ def get_previous_month_totals(
     )
     if df.empty:
         return {}
-    return dict(zip(df["tenant"], df["total_pods"]))
+    return {tenant: int(value) for tenant, value in zip(df["tenant"], df["metric_value"])}
 
 
 def replace_all_rows(duckdb, table_name: str, rows: list[tuple]) -> None:
@@ -543,17 +596,32 @@ def main() -> None:
         replace_all_rows(duckdb, POD_MONTHLY_TABLE_NAME, monthly_rows)
         load_mode = "bootstrap"
     else:
-        daily_seed_totals = get_previous_day_totals(
-            duckdb, POD_DAILY_TABLE_NAME, current_year_start
+        daily_seed_totals = get_previous_day_values(
+            duckdb, POD_DAILY_TABLE_NAME, current_year_start, "total_pods"
         )
-        monthly_seed_totals = get_previous_month_totals(
-            duckdb, POD_MONTHLY_TABLE_NAME, current_year_month_start
+        daily_seed_onboarded = get_previous_day_values(
+            duckdb, POD_DAILY_TABLE_NAME, current_year_start, "onboarded_pods"
+        )
+        monthly_seed_totals = get_previous_month_values(
+            duckdb, POD_MONTHLY_TABLE_NAME, current_year_month_start, "total_pods"
+        )
+        monthly_seed_onboarded = get_previous_month_values(
+            duckdb,
+            POD_MONTHLY_TABLE_NAME,
+            current_year_month_start,
+            "onboarded_pods",
         )
         daily_rows = build_daily_rows(
-            snapshot_df, run_ts, seed_totals=daily_seed_totals
+            snapshot_df,
+            run_ts,
+            seed_totals=daily_seed_totals,
+            seed_onboarded=daily_seed_onboarded,
         )
         monthly_rows = build_monthly_rows(
-            snapshot_df, run_ts, seed_totals=monthly_seed_totals
+            snapshot_df,
+            run_ts,
+            seed_totals=monthly_seed_totals,
+            seed_onboarded=monthly_seed_onboarded,
         )
         replace_rows_in_range(
             duckdb,
@@ -582,7 +650,9 @@ def main() -> None:
             tenant,
             source_backend,
             monthly_delta,
-            total_pods
+            total_pods,
+            monthly_onboarded_delta,
+            onboarded_pods
         FROM {POD_MONTHLY_TABLE_NAME}
         ORDER BY month_start DESC, tenant
         LIMIT 20
@@ -595,7 +665,9 @@ def main() -> None:
             tenant,
             source_backend,
             daily_delta,
-            total_pods
+            total_pods,
+            daily_onboarded_delta,
+            onboarded_pods
         FROM {POD_DAILY_TABLE_NAME}
         ORDER BY date DESC, tenant
         LIMIT 20
