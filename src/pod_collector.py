@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
 from duckdb_client import get_duckdb_client
+from utils import accounts_map, roles_arn_map
 
 
 load_dotenv()
@@ -26,6 +27,9 @@ POD_S3_BUCKET = os.environ.get("POD_S3_BUCKET", "statistics-master-eu-central-1"
 POD_S3_PREFIX = os.environ.get("POD_S3_PREFIX", "daily_source_totals").strip("/")
 POD_SNAPSHOT_FILENAME = os.environ.get("POD_SNAPSHOT_FILENAME", "snapshots.json")
 POD_BOOTSTRAP_START_YEAR = int(os.environ.get("POD_BOOTSTRAP_START_YEAR", "2024"))
+POD_AWS_ROLE_SESSION_NAME = os.environ.get(
+    "POD_AWS_ROLE_SESSION_NAME", "PodCollectorSession"
+)
 PARTITION_YEAR_PATTERN = re.compile(r"(?:^|/)year=(\d{4})(?:/|$)")
 REQUIRED_SNAPSHOT_COLUMNS = ("date", "tenant", "source_backend", "pods", "onboarded")
 
@@ -49,22 +53,22 @@ TENANT_SOURCES = (
         "POD_DIGIWATT_S3_PREFIX",
         "POD_DIGIWATT_SNAPSHOT_FILENAME",
     ),
-    # TenantSource(
-    #     "fastweb",
-    #     "POD_FASTWEB_PATH_TEMPLATE",
-    #     "POD_FASTWEB_PATHS",
-    #     "POD_FASTWEB_S3_BUCKET",
-    #     "POD_FASTWEB_S3_PREFIX",
-    #     "POD_FASTWEB_SNAPSHOT_FILENAME",
-    # ),
-    # TenantSource(
-    #     "sinapsi",
-    #     "POD_SINAPSI_PATH_TEMPLATE",
-    #     "POD_SINAPSI_PATHS",
-    #     "POD_SINAPSI_S3_BUCKET",
-    #     "POD_SINAPSI_S3_PREFIX",
-    #     "POD_SINAPSI_SNAPSHOT_FILENAME",
-    # ),
+    TenantSource(
+        "fastweb",
+        "POD_FASTWEB_PATH_TEMPLATE",
+        "POD_FASTWEB_PATHS",
+        "POD_FASTWEB_S3_BUCKET",
+        "POD_FASTWEB_S3_PREFIX",
+        "POD_FASTWEB_SNAPSHOT_FILENAME",
+    ),
+    TenantSource(
+        "sinapsi",
+        "POD_SINAPSI_PATH_TEMPLATE",
+        "POD_SINAPSI_PATHS",
+        "POD_SINAPSI_S3_BUCKET",
+        "POD_SINAPSI_S3_PREFIX",
+        "POD_SINAPSI_SNAPSHOT_FILENAME",
+    ),
 )
 
 
@@ -90,8 +94,72 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def get_s3_client():
-    return boto3.client("s3", region_name=AWS_REGION)
+def assume_role(role_arn: str, session_name: str = POD_AWS_ROLE_SESSION_NAME) -> dict:
+    sts_client = boto3.client("sts", region_name=AWS_REGION)
+    resp = sts_client.assume_role(RoleArn=role_arn, RoleSessionName=session_name)
+    creds = resp["Credentials"]
+    return {
+        "aws_access_key_id": creds["AccessKeyId"],
+        "aws_secret_access_key": creds["SecretAccessKey"],
+        "aws_session_token": creds["SessionToken"],
+        "region_name": AWS_REGION,
+    }
+
+
+def get_source_account_env_name(source: TenantSource) -> str:
+    return f"POD_{source.source_key.upper()}_AWS_ACCOUNT"
+
+
+def get_source_role_arn_env_name(source: TenantSource) -> str:
+    return f"POD_{source.source_key.upper()}_AWS_ROLE_ARN"
+
+
+def detect_account_name_from_bucket(bucket: str) -> str | None:
+    for account_name, account_id in accounts_map.items():
+        if account_id in bucket:
+            return account_name
+    return None
+
+
+def get_source_account_name(source: TenantSource) -> str | None:
+    explicit_account_name = os.environ.get(get_source_account_env_name(source))
+    if explicit_account_name:
+        return explicit_account_name
+
+    if source.source_key in roles_arn_map:
+        return source.source_key
+
+    return detect_account_name_from_bucket(get_source_bucket(source))
+
+
+def get_source_role_arn(source: TenantSource) -> str | None:
+    explicit_role_arn = os.environ.get(get_source_role_arn_env_name(source))
+    if explicit_role_arn:
+        return explicit_role_arn
+
+    account_name = get_source_account_name(source)
+    if account_name is None:
+        return None
+    if account_name not in roles_arn_map:
+        raise ValueError(
+            f"Account AWS non configurato per source '{source.source_key}': {account_name}"
+        )
+    return roles_arn_map[account_name]["infra"]
+
+
+def get_s3_client(source: TenantSource | None = None):
+    if source is None:
+        return boto3.client("s3", region_name=AWS_REGION)
+
+    role_arn = get_source_role_arn(source)
+    if role_arn is None:
+        return boto3.client("s3", region_name=AWS_REGION)
+
+    print(
+        f"AssumeRole per source={source.source_key}: role_arn={role_arn}",
+        file=sys.stderr,
+    )
+    return boto3.client("s3", **assume_role(role_arn))
 
 
 def get_source_bucket(source: TenantSource) -> str:
@@ -110,9 +178,7 @@ def get_default_path_template(source: TenantSource) -> str:
     source_bucket = get_source_bucket(source)
     source_prefix = get_source_prefix(source)
     source_filename = get_source_snapshot_filename(source)
-    return (
-        f"s3://{source_bucket}/{source_prefix}/year={{year}}/{source_filename}"
-    )
+    return f"s3://{source_bucket}/{source_prefix}/year={{year}}/{source_filename}"
 
 
 def get_path_template(source: TenantSource) -> str:
@@ -162,10 +228,18 @@ def maybe_decompress(
     return raw_bytes.decode("utf-8")
 
 
-def read_json_payload(path: str, s3_client) -> dict:
+def read_json_payload(path: str, s3_client, source_key: str | None = None) -> dict:
+    bucket: str | None = None
+    key: str | None = None
+    source_label = source_key or "unknown"
     try:
         if is_s3_path(path):
             bucket, key = parse_s3_uri(path)
+            print(
+                "Lettura snapshot S3:"
+                f" source={source_label}, bucket={bucket}, key={key}, path={path}",
+                file=sys.stderr,
+            )
             response = s3_client.get_object(Bucket=bucket, Key=key)
             raw_content = maybe_decompress(
                 response["Body"].read(),
@@ -173,10 +247,21 @@ def read_json_payload(path: str, s3_client) -> dict:
                 content_encoding=response.get("ContentEncoding"),
             )
         else:
+            print(
+                f"Lettura snapshot locale: source={source_label}, path={path}",
+                file=sys.stderr,
+            )
             with open(path, "rb") as file_handle:
                 raw_content = maybe_decompress(file_handle.read(), path)
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code")
+        if bucket is not None and key is not None:
+            print(
+                "Errore S3 leggendo snapshot:"
+                f" source={source_label}, bucket={bucket}, key={key}, path={path},"
+                f" code={error_code or 'unknown'}",
+                file=sys.stderr,
+            )
         if error_code in {"NoSuchKey", "404"}:
             raise FileNotFoundError(f"File snapshot non trovato: {path}") from exc
         raise
@@ -284,20 +369,49 @@ def flatten_snapshot_payload(
     return records
 
 
-def load_snapshot_df(input_paths_by_source: dict[str, list[str]]) -> pd.DataFrame:
-    s3_client = get_s3_client()
+def load_snapshot_df(
+    input_paths_by_source: dict[str, list[str]],
+    skip_missing_leading_paths: bool = False,
+) -> tuple[pd.DataFrame, dict[str, list[str]]]:
     source_by_key = {source.source_key: source for source in TENANT_SOURCES}
     records: list[dict] = []
+    loaded_paths_by_source = {
+        source_key: [] for source_key in input_paths_by_source.keys()
+    }
 
     for source_key, input_paths in input_paths_by_source.items():
         source = source_by_key[source_key]
+        s3_client = get_s3_client(source)
+        found_snapshot_for_source = False
         for path in input_paths:
-            payload = read_json_payload(path, s3_client)
+            try:
+                payload = read_json_payload(path, s3_client, source_key=source_key)
+            except FileNotFoundError:
+                if skip_missing_leading_paths and not found_snapshot_for_source:
+                    print(
+                        "Snapshot non trovato durante bootstrap,"
+                        f" salto path iniziale per source={source_key}: {path}",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise
+            found_snapshot_for_source = True
+            loaded_paths_by_source[source_key].append(path)
             records.extend(flatten_snapshot_payload(payload, path, source))
 
+        if skip_missing_leading_paths and not found_snapshot_for_source:
+            print(
+                "Nessuno snapshot trovato per source="
+                f"{source_key} negli anni richiesti; source ignorata.",
+                file=sys.stderr,
+            )
+
     if not records:
-        return pd.DataFrame(columns=list(REQUIRED_SNAPSHOT_COLUMNS))
-    return pd.DataFrame.from_records(records, columns=list(REQUIRED_SNAPSHOT_COLUMNS))
+        return pd.DataFrame(columns=list(REQUIRED_SNAPSHOT_COLUMNS)), loaded_paths_by_source
+    return (
+        pd.DataFrame.from_records(records, columns=list(REQUIRED_SNAPSHOT_COLUMNS)),
+        loaded_paths_by_source,
+    )
 
 
 def normalize_snapshot_df(snapshot_df: pd.DataFrame) -> pd.DataFrame:
@@ -345,12 +459,9 @@ def normalize_snapshot_df(snapshot_df: pd.DataFrame) -> pd.DataFrame:
         ["date", "tenant", "source_backend"]
     ).reset_index(drop=True)
 
-    conflicts = (
-        normalized.groupby(["date", "tenant"], as_index=False)
-        .agg(
-            distinct_pods=("pods", "nunique"),
-            distinct_onboarded=("onboarded", "nunique"),
-        )
+    conflicts = normalized.groupby(["date", "tenant"], as_index=False).agg(
+        distinct_pods=("pods", "nunique"),
+        distinct_onboarded=("onboarded", "nunique"),
     )
     conflicts = conflicts[
         (conflicts["distinct_pods"] > 1) | (conflicts["distinct_onboarded"] > 1)
@@ -402,9 +513,9 @@ def build_daily_rows(
         daily_df.loc[first_rows, "tenant"].map(seed_onboarded).fillna(0)
     )
     daily_df["daily_delta"] = daily_df["pods"] - previous_total_values.fillna(0)
-    daily_df["daily_onboarded_delta"] = (
-        daily_df["onboarded"] - previous_onboarded_values.fillna(0)
-    )
+    daily_df["daily_onboarded_delta"] = daily_df[
+        "onboarded"
+    ] - previous_onboarded_values.fillna(0)
 
     return [
         (
@@ -451,9 +562,9 @@ def build_monthly_rows(
         monthly_df.loc[first_rows, "tenant"].map(seed_onboarded).fillna(0)
     )
     monthly_df["monthly_delta"] = monthly_df["pods"] - previous_total_values.fillna(0)
-    monthly_df["monthly_onboarded_delta"] = (
-        monthly_df["onboarded"] - previous_onboarded_values.fillna(0)
-    )
+    monthly_df["monthly_onboarded_delta"] = monthly_df[
+        "onboarded"
+    ] - previous_onboarded_values.fillna(0)
 
     return [
         (
@@ -505,7 +616,9 @@ def get_previous_day_values(
     )
     if df.empty:
         return {}
-    return {tenant: int(value) for tenant, value in zip(df["tenant"], df["metric_value"])}
+    return {
+        tenant: int(value) for tenant, value in zip(df["tenant"], df["metric_value"])
+    }
 
 
 def get_previous_month_values(
@@ -525,7 +638,9 @@ def get_previous_month_values(
     )
     if df.empty:
         return {}
-    return {tenant: int(value) for tenant, value in zip(df["tenant"], df["metric_value"])}
+    return {
+        tenant: int(value) for tenant, value in zip(df["tenant"], df["metric_value"])
+    }
 
 
 def replace_all_rows(duckdb, table_name: str, rows: list[tuple]) -> None:
@@ -577,7 +692,10 @@ def main() -> None:
     target_years, is_bootstrap = get_target_years(duckdb, current_year)
     input_paths_by_source = build_input_paths_by_source(target_years)
 
-    raw_snapshot_df = load_snapshot_df(input_paths_by_source)
+    raw_snapshot_df, loaded_paths_by_source = load_snapshot_df(
+        input_paths_by_source,
+        skip_missing_leading_paths=is_bootstrap,
+    )
     snapshot_df = normalize_snapshot_df(raw_snapshot_df)
     if snapshot_df.empty:
         print("Nessuno snapshot pod valido disponibile.")
@@ -677,7 +795,7 @@ def main() -> None:
     print(
         "POD collector completato:"
         f" modalita={load_mode}, anni={target_years[0]}->{target_years[-1]},"
-        f" file per sorgente [{summarize_loaded_sources(input_paths_by_source)}],"
+        f" file per sorgente [{summarize_loaded_sources(loaded_paths_by_source)}],"
         f" {len(snapshot_df)} snapshot tenant/giorno,"
         f" {len(monthly_rows)} righe aggiornate su '{POD_MONTHLY_TABLE_NAME}',"
         f" {len(daily_rows)} righe aggiornate su '{POD_DAILY_TABLE_NAME}'."

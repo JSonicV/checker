@@ -256,22 +256,26 @@ def build_table_state(
         value_column="total_pods",
         window_days=30,
     )
-    if ordering_last_30_days is not None:
-        current_month_values = reference_matrix.loc[latest_month].to_dict()
-        tenants = sorted(
-            tenants,
-            key=lambda tenant: (
-                -ordering_last_30_days.tenant_delta.get(tenant, 0.0),
-                -(
-                    float(current_month_values.get(tenant))
-                    if pd.notna(current_month_values.get(tenant))
-                    else float("-inf")
-                ),
-                tenant.casefold(),
+    current_month_values = reference_matrix.loc[latest_month].to_dict()
+    last_30_day_deltas = (
+        ordering_last_30_days.tenant_delta
+        if ordering_last_30_days is not None
+        else {}
+    )
+    tenants = sorted(
+        tenants,
+        key=lambda tenant: (
+            -(
+                float(current_month_values.get(tenant))
+                if pd.notna(current_month_values.get(tenant))
+                else float("-inf")
             ),
-        )
-        matrix = matrix.reindex(columns=tenants)
-        reference_matrix = reference_matrix.reindex(columns=tenants)
+            -float(last_30_day_deltas.get(tenant, 0.0)),
+            tenant.casefold(),
+        ),
+    )
+    matrix = matrix.reindex(columns=tenants)
+    reference_matrix = reference_matrix.reindex(columns=tenants)
 
     last_30_days = _build_last_days_row(
         pod_daily_df,
