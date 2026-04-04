@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from runtime_config import get_db_mtime_ns, get_db_path as resolve_db_path
 
 
 MONTH_NAMES_IT = {
@@ -20,7 +21,11 @@ MONTH_NAMES_IT = {
 
 
 def get_db_path(db_name: str) -> Path:
-    return Path(__file__).resolve().parents[2] / "db" / db_name
+    return resolve_db_path(db_name)
+
+
+def get_db_cache_buster(db_name: str) -> int:
+    return get_db_mtime_ns(db_name)
 
 
 def safe_div(numerator, denominator):

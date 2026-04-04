@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 try:
-    from app.page_shared import format_month_label, get_db_path
+    from app.page_shared import format_month_label, get_db_cache_buster, get_db_path
     from app.pages.pod.css import inject_styles
     from app.pages.pod.logic import (
         build_table_state,
@@ -12,7 +12,7 @@ try:
         load_monthly_data,
     )
 except ModuleNotFoundError:
-    from page_shared import format_month_label, get_db_path
+    from page_shared import format_month_label, get_db_cache_buster, get_db_path
     from pages.pod.css import inject_styles
     from pages.pod.logic import build_table_state, load_daily_data, load_monthly_data
 
@@ -25,8 +25,15 @@ def render_page(db_name: str, monthly_table_name: str, daily_table_name: str) ->
         st.error(f"File DuckDB non trovato: {db_path}")
         return
 
+    db_cache_buster = get_db_cache_buster(db_name)
+
     try:
-        pod_monthly_df = load_monthly_data(db_name, monthly_table_name, months=12)
+        pod_monthly_df = load_monthly_data(
+            db_name,
+            monthly_table_name,
+            months=12,
+            _db_cache_buster=db_cache_buster,
+        )
     except Exception:
         st.info(
             "Tabella pod non disponibile. Esegui `python3 src/pod_collector.py` "
@@ -39,7 +46,12 @@ def render_page(db_name: str, monthly_table_name: str, daily_table_name: str) ->
         return
 
     try:
-        pod_daily_df = load_daily_data(db_name, daily_table_name, days=60)
+        pod_daily_df = load_daily_data(
+            db_name,
+            daily_table_name,
+            days=60,
+            _db_cache_buster=db_cache_buster,
+        )
     except Exception:
         pod_daily_df = pd.DataFrame(
             columns=["date", "tenant", "total_pods", "onboarded_pods"]

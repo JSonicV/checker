@@ -32,21 +32,43 @@ ROW_LABELS = {
 
 
 @st.cache_data(show_spinner=False)
-def load_data(db_name: str, table_name: str):
+def load_data(db_name: str, table_name: str, _db_cache_buster: int):
     client = get_duckdb_client(db_name)
-    return client.get_services_metrics(table_name)
+    try:
+        return client.get_services_metrics(table_name)
+    finally:
+        client.close()
 
 
 @st.cache_data(show_spinner=False)
-def load_data_for_anchor(db_name: str, table_name: str, anchor_date: str):
+def load_data_for_anchor(
+    db_name: str, table_name: str, anchor_date: str, _db_cache_buster: int
+):
     client = get_duckdb_client(db_name)
-    return client.get_services_metrics(table_name, anchor_date=anchor_date)
+    try:
+        return client.get_services_metrics(table_name, anchor_date=anchor_date)
+    finally:
+        client.close()
 
 
 @st.cache_data(show_spinner=False)
-def load_available_month_anchors(db_name: str, table_name: str):
+def load_data_for_month(
+    db_name: str, table_name: str, month_start: str, _db_cache_buster: int
+):
     client = get_duckdb_client(db_name)
-    return client.get_available_month_anchors(table_name)
+    try:
+        return client.get_services_metrics_for_month(table_name, month_start=month_start)
+    finally:
+        client.close()
+
+
+@st.cache_data(show_spinner=False)
+def load_available_month_anchors(db_name: str, table_name: str, _db_cache_buster: int):
+    client = get_duckdb_client(db_name)
+    try:
+        return client.get_available_month_anchors(table_name)
+    finally:
+        client.close()
 
 
 def is_valid_table_name(table_name: str) -> bool:
@@ -107,6 +129,26 @@ def period_label(option: str) -> str:
     if pd.isna(month_start):
         return option
     return format_month_label(month_start.date())
+
+
+def build_row_labels(anchor_date) -> dict[str, str]:
+    labels = dict(ROW_LABELS)
+    anchor_ts = pd.to_datetime(anchor_date, errors="coerce")
+    if pd.isna(anchor_ts):
+        return labels
+
+    anchor_month = anchor_ts.to_period("M").to_timestamp()
+    month_metrics = [
+        ("mtd", 0),
+        ("prev_mtd", 1),
+        ("prev2_mtd", 2),
+        ("prev3_mtd", 3),
+        ("prev4_mtd", 4),
+    ]
+    for metric, months_back in month_metrics:
+        month_start = anchor_month - pd.DateOffset(months=months_back)
+        labels[metric] = format_month_label(month_start.date())
+    return labels
 
 
 def build_total_series(df: pd.DataFrame, metric_cols: list[str]) -> pd.Series:

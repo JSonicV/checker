@@ -154,6 +154,10 @@ def inject_styles() -> None:
             max-width: 170px;
             margin-bottom: 0;
         }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) > div[data-testid="stElementContainer"]:has(div[data-testid="stButton"]) {
+            flex: 0 0 auto;
+            margin-bottom: 0;
+        }
         div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) > div[data-testid="stElementContainer"]:has(div[data-testid="stDownloadButton"]) {
             flex: 0 0 auto;
             margin-bottom: 0;
@@ -168,15 +172,37 @@ def inject_styles() -> None:
             color: #FFFFFF !important;
             fill: #FFFFFF !important;
         }
+        div[data-testid="stButton"],
         div[data-testid="stDownloadButton"] {
             display: flex;
             justify-content: flex-end;
         }
+        div[data-testid="stButton"] button,
+        div[data-testid="stButton"] button span,
         div[data-testid="stDownloadButton"] button,
         div[data-testid="stDownloadButton"] button span {
             color: #FFFFFF !important;
         }
+        div[data-testid="stButton"] button *,
         div[data-testid="stDownloadButton"] button * {
+            color: #FFFFFF !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="secondary"] {
+            background: #FFFFFF !important;
+            border: 1px solid #D1D5DB !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="secondary"],
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="secondary"] *,
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="secondary"] span {
+            color: #9CA3AF !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="primary"] {
+            background: #000000 !important;
+            border: 1px solid #000000 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="primary"],
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="primary"] *,
+        div[data-testid="stVerticalBlock"]:has(div[data-testid="stSelectbox"]):has(div[data-testid="stDownloadButton"]) div[data-testid="stButton"] button[kind="primary"] span {
             color: #FFFFFF !important;
         }
         table.costs-table tr.row-current td,

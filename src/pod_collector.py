@@ -685,124 +685,128 @@ def main() -> None:
         )
 
     duckdb = get_duckdb_client(DUCKDB_DATABASE)
-    duckdb.create_pod_trend_table(POD_MONTHLY_TABLE_NAME)
-    duckdb.create_pod_daily_trend_table(POD_DAILY_TABLE_NAME)
+    try:
+        duckdb.create_pod_trend_table(POD_MONTHLY_TABLE_NAME)
+        duckdb.create_pod_daily_trend_table(POD_DAILY_TABLE_NAME)
 
-    current_year = datetime.now(UTC).year
-    target_years, is_bootstrap = get_target_years(duckdb, current_year)
-    input_paths_by_source = build_input_paths_by_source(target_years)
+        current_year = datetime.now(UTC).year
+        target_years, is_bootstrap = get_target_years(duckdb, current_year)
+        input_paths_by_source = build_input_paths_by_source(target_years)
 
-    raw_snapshot_df, loaded_paths_by_source = load_snapshot_df(
-        input_paths_by_source,
-        skip_missing_leading_paths=is_bootstrap,
-    )
-    snapshot_df = normalize_snapshot_df(raw_snapshot_df)
-    if snapshot_df.empty:
-        print("Nessuno snapshot pod valido disponibile.")
-        return
+        raw_snapshot_df, loaded_paths_by_source = load_snapshot_df(
+            input_paths_by_source,
+            skip_missing_leading_paths=is_bootstrap,
+        )
+        snapshot_df = normalize_snapshot_df(raw_snapshot_df)
+        if snapshot_df.empty:
+            print("Nessuno snapshot pod valido disponibile.")
+            return
 
-    run_ts = datetime.now(UTC)
-    current_year_start = pd.Timestamp(year=current_year, month=1, day=1)
-    current_year_end = pd.Timestamp(year=current_year, month=12, day=31)
-    current_year_month_start = month_start(current_year_start)
-    current_year_month_end = month_start(current_year_end)
+        run_ts = datetime.now(UTC)
+        current_year_start = pd.Timestamp(year=current_year, month=1, day=1)
+        current_year_end = pd.Timestamp(year=current_year, month=12, day=31)
+        current_year_month_start = month_start(current_year_start)
+        current_year_month_end = month_start(current_year_end)
 
-    if is_bootstrap:
-        daily_rows = build_daily_rows(snapshot_df, run_ts)
-        monthly_rows = build_monthly_rows(snapshot_df, run_ts)
-        replace_all_rows(duckdb, POD_DAILY_TABLE_NAME, daily_rows)
-        replace_all_rows(duckdb, POD_MONTHLY_TABLE_NAME, monthly_rows)
-        load_mode = "bootstrap"
-    else:
-        daily_seed_totals = get_previous_day_values(
-            duckdb, POD_DAILY_TABLE_NAME, current_year_start, "total_pods"
-        )
-        daily_seed_onboarded = get_previous_day_values(
-            duckdb, POD_DAILY_TABLE_NAME, current_year_start, "onboarded_pods"
-        )
-        monthly_seed_totals = get_previous_month_values(
-            duckdb, POD_MONTHLY_TABLE_NAME, current_year_month_start, "total_pods"
-        )
-        monthly_seed_onboarded = get_previous_month_values(
-            duckdb,
-            POD_MONTHLY_TABLE_NAME,
-            current_year_month_start,
-            "onboarded_pods",
-        )
-        daily_rows = build_daily_rows(
-            snapshot_df,
-            run_ts,
-            seed_totals=daily_seed_totals,
-            seed_onboarded=daily_seed_onboarded,
-        )
-        monthly_rows = build_monthly_rows(
-            snapshot_df,
-            run_ts,
-            seed_totals=monthly_seed_totals,
-            seed_onboarded=monthly_seed_onboarded,
-        )
-        replace_rows_in_range(
-            duckdb,
-            POD_DAILY_TABLE_NAME,
-            "date",
-            current_year_start.date(),
-            current_year_end.date(),
-            daily_rows,
-        )
-        replace_rows_in_range(
-            duckdb,
-            POD_MONTHLY_TABLE_NAME,
-            "month_start",
-            current_year_month_start.date(),
-            current_year_month_end.date(),
-            monthly_rows,
-        )
-        load_mode = "refresh"
+        if is_bootstrap:
+            daily_rows = build_daily_rows(snapshot_df, run_ts)
+            monthly_rows = build_monthly_rows(snapshot_df, run_ts)
+            replace_all_rows(duckdb, POD_DAILY_TABLE_NAME, daily_rows)
+            replace_all_rows(duckdb, POD_MONTHLY_TABLE_NAME, monthly_rows)
+            load_mode = "bootstrap"
+        else:
+            daily_seed_totals = get_previous_day_values(
+                duckdb, POD_DAILY_TABLE_NAME, current_year_start, "total_pods"
+            )
+            daily_seed_onboarded = get_previous_day_values(
+                duckdb, POD_DAILY_TABLE_NAME, current_year_start, "onboarded_pods"
+            )
+            monthly_seed_totals = get_previous_month_values(
+                duckdb, POD_MONTHLY_TABLE_NAME, current_year_month_start, "total_pods"
+            )
+            monthly_seed_onboarded = get_previous_month_values(
+                duckdb,
+                POD_MONTHLY_TABLE_NAME,
+                current_year_month_start,
+                "onboarded_pods",
+            )
+            daily_rows = build_daily_rows(
+                snapshot_df,
+                run_ts,
+                seed_totals=daily_seed_totals,
+                seed_onboarded=daily_seed_onboarded,
+            )
+            monthly_rows = build_monthly_rows(
+                snapshot_df,
+                run_ts,
+                seed_totals=monthly_seed_totals,
+                seed_onboarded=monthly_seed_onboarded,
+            )
+            replace_rows_in_range(
+                duckdb,
+                POD_DAILY_TABLE_NAME,
+                "date",
+                current_year_start.date(),
+                current_year_end.date(),
+                daily_rows,
+            )
+            replace_rows_in_range(
+                duckdb,
+                POD_MONTHLY_TABLE_NAME,
+                "month_start",
+                current_year_month_start.date(),
+                current_year_month_end.date(),
+                monthly_rows,
+            )
+            load_mode = "refresh"
 
-    min_date = snapshot_df["date"].min().date()
-    max_date = snapshot_df["date"].max().date()
-    monthly_summary = duckdb.execute(
-        f"""
-        SELECT
-            month_start,
-            tenant,
-            source_backend,
-            monthly_delta,
-            total_pods,
-            monthly_onboarded_delta,
-            onboarded_pods
-        FROM {POD_MONTHLY_TABLE_NAME}
-        ORDER BY month_start DESC, tenant
-        LIMIT 20
-        """
-    )
-    daily_summary = duckdb.execute(
-        f"""
-        SELECT
-            date,
-            tenant,
-            source_backend,
-            daily_delta,
-            total_pods,
-            daily_onboarded_delta,
-            onboarded_pods
-        FROM {POD_DAILY_TABLE_NAME}
-        ORDER BY date DESC, tenant
-        LIMIT 20
-        """
-    )
+        min_date = snapshot_df["date"].min().date()
+        max_date = snapshot_df["date"].max().date()
+        monthly_summary = duckdb.execute(
+            f"""
+            SELECT
+                month_start,
+                tenant,
+                source_backend,
+                monthly_delta,
+                total_pods,
+                monthly_onboarded_delta,
+                onboarded_pods
+            FROM {POD_MONTHLY_TABLE_NAME}
+            ORDER BY month_start DESC, tenant
+            LIMIT 20
+            """
+        )
+        daily_summary = duckdb.execute(
+            f"""
+            SELECT
+                date,
+                tenant,
+                source_backend,
+                daily_delta,
+                total_pods,
+                daily_onboarded_delta,
+                onboarded_pods
+            FROM {POD_DAILY_TABLE_NAME}
+            ORDER BY date DESC, tenant
+            LIMIT 20
+            """
+        )
+        duckdb.checkpoint()
 
-    print(
-        "POD collector completato:"
-        f" modalita={load_mode}, anni={target_years[0]}->{target_years[-1]},"
-        f" file per sorgente [{summarize_loaded_sources(loaded_paths_by_source)}],"
-        f" {len(snapshot_df)} snapshot tenant/giorno,"
-        f" {len(monthly_rows)} righe aggiornate su '{POD_MONTHLY_TABLE_NAME}',"
-        f" {len(daily_rows)} righe aggiornate su '{POD_DAILY_TABLE_NAME}'."
-        f" Intervallo snapshot letto: {min_date} -> {max_date}."
-    )
-    print(monthly_summary)
-    print(daily_summary)
+        print(
+            "POD collector completato:"
+            f" modalita={load_mode}, anni={target_years[0]}->{target_years[-1]},"
+            f" file per sorgente [{summarize_loaded_sources(loaded_paths_by_source)}],"
+            f" {len(snapshot_df)} snapshot tenant/giorno,"
+            f" {len(monthly_rows)} righe aggiornate su '{POD_MONTHLY_TABLE_NAME}',"
+            f" {len(daily_rows)} righe aggiornate su '{POD_DAILY_TABLE_NAME}'."
+            f" Intervallo snapshot letto: {min_date} -> {max_date}."
+        )
+        print(monthly_summary)
+        print(daily_summary)
+    finally:
+        duckdb.close()
 
 
 if __name__ == "__main__":

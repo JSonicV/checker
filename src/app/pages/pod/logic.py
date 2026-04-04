@@ -47,15 +47,25 @@ class PodTableState:
 
 
 @st.cache_data(show_spinner=False)
-def load_monthly_data(db_name: str, table_name: str, months: int = 12):
+def load_monthly_data(
+    db_name: str, table_name: str, months: int = 12, _db_cache_buster: int = 0
+):
     client = get_duckdb_client(db_name)
-    return client.get_pod_monthly_trend(table_name, months=months)
+    try:
+        return client.get_pod_monthly_trend(table_name, months=months)
+    finally:
+        client.close()
 
 
 @st.cache_data(show_spinner=False)
-def load_daily_data(db_name: str, table_name: str, days: int = 60):
+def load_daily_data(
+    db_name: str, table_name: str, days: int = 60, _db_cache_buster: int = 0
+):
     client = get_duckdb_client(db_name)
-    return client.get_pod_daily_trend(table_name, days=days)
+    try:
+        return client.get_pod_daily_trend(table_name, days=days)
+    finally:
+        client.close()
 
 
 def _resolve_metric_column(metric: str) -> str:

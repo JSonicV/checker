@@ -12,3 +12,6 @@ db/*
 *.bak
 .env
 .DS_Store
+.cron_env.sh
+*.duckdb.download
+*.refresh.duckdb

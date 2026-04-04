@@ -3,7 +3,7 @@ import boto3
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timezone
-from utils import roles_arn_map
+from utils import accounts_map, roles_arn_map
 
 load_dotenv()
 REGION = "eu-central-1"
@@ -50,7 +50,12 @@ class AwsCostsClient:
             )
             if self.account == "digiwatt":
                 kwargs["Filter"] = {
-                    "Not": {"Tags": {"Key": "Publisher", "Values": ["terraform"]}}
+                    "Not": {
+                        "Dimensions": {
+                            "Key": "LINKED_ACCOUNT",
+                            "Values": [accounts_map["sinapsi_prod"]],
+                        }
+                    }
                 }
             if token:
                 kwargs["NextPageToken"] = token

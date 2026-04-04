@@ -5,11 +5,11 @@ import pandas as pd
 import streamlit as st
 
 try:
-    from app.page_shared import get_db_path
+    from app.page_shared import get_db_cache_buster, get_db_path
     from app.pages.costs.css import inject_styles
     from app.pages.costs.logic import (
         ROW_DEFS,
-        ROW_LABELS,
+        build_row_labels,
         build_account_matrix,
         build_period_options,
         get_accounts,
@@ -18,16 +18,17 @@ try:
         load_available_month_anchors,
         load_data,
         load_data_for_anchor,
+        load_data_for_month,
         normalize_costs_dataframe,
         normalize_month_anchors,
         period_label,
     )
 except ModuleNotFoundError:
-    from page_shared import get_db_path
+    from page_shared import get_db_cache_buster, get_db_path
     from pages.costs.css import inject_styles
     from pages.costs.logic import (
         ROW_DEFS,
-        ROW_LABELS,
+        build_row_labels,
         build_account_matrix,
         build_period_options,
         get_accounts,
@@ -36,6 +37,7 @@ except ModuleNotFoundError:
         load_available_month_anchors,
         load_data,
         load_data_for_anchor,
+        load_data_for_month,
         normalize_costs_dataframe,
         normalize_month_anchors,
         period_label,
@@ -54,14 +56,15 @@ def render_page(db_name: str, table_name: str) -> None:
         st.error(f"File DuckDB non trovato: {db_path}")
         return
 
-    df = load_data(db_name, table_name)
+    db_cache_buster = get_db_cache_buster(db_name)
+    df = load_data(db_name, table_name, db_cache_buster)
     if df.empty:
         st.info("Nessun dato disponibile per la query.")
         return
 
     df = normalize_costs_dataframe(df)
     month_anchors = normalize_month_anchors(
-        load_available_month_anchors(db_name, table_name)
+        load_available_month_anchors(db_name, table_name, db_cache_buster)
     )
     accounts = get_accounts(df)
 
@@ -224,7 +227,7 @@ def render_page(db_name: str, table_name: str) -> None:
         output.seek(0)
         return output.getvalue()
 
-    def build_download_payload(account_df: pd.DataFrame):
+    def build_download_payload(account_df: pd.DataFrame, row_labels: dict[str, str]):
         if account_df.empty:
             return ["Metric", "Total"], [], []
 
@@ -233,7 +236,7 @@ def render_page(db_name: str, table_name: str) -> None:
         value_rows = []
         pct_rows = []
         for metric, _delta_col, pct_col in ROW_DEFS:
-            label = ROW_LABELS.get(metric, metric)
+            label = row_labels.get(metric, metric)
             row_values = {
                 "Metric": label,
                 "Total": format_cell_text(totals.get(metric), totals.get(pct_col)),
@@ -257,6 +260,14 @@ def render_page(db_name: str, table_name: str) -> None:
 
         return columns, value_rows, pct_rows
 
+    def apply_tax_filter(account_df: pd.DataFrame, tax_mode: str) -> pd.DataFrame:
+        if tax_mode == "tax":
+            return account_df
+        return account_df[account_df["service"] != "Tax"].copy()
+
+    def toggle_flag(state_key: str) -> None:
+        st.session_state[state_key] = not st.session_state.get(state_key, False)
+
     for account in accounts:
         base_account_df = df[df["account"] == account]
         if base_account_df.empty:
@@ -269,7 +280,16 @@ def render_page(db_name: str, table_name: str) -> None:
         st.markdown(f"**Account:** {account} (in USD)")
 
         toolbar_left, toolbar_right = st.columns([1, 1])
+        tax_state_key = f"show-tax-{account}"
+        tax_period_key = f"show-tax-period-{account}"
+        mtd_state_key = f"show-mtd-{account}"
+        mtd_period_key = f"show-mtd-period-{account}"
+        if tax_state_key not in st.session_state:
+            st.session_state[tax_state_key] = False
+
         with toolbar_right:
+            tax_button_slot = st.empty()
+            mtd_button_slot = st.empty()
             selected_period = st.selectbox(
                 "Periodo",
                 options=period_options,
@@ -278,26 +298,79 @@ def render_page(db_name: str, table_name: str) -> None:
                 label_visibility="collapsed",
             )
 
+            default_tax_active = selected_period != "current"
+            if st.session_state.get(tax_period_key) != selected_period:
+                st.session_state[tax_state_key] = default_tax_active
+                st.session_state[tax_period_key] = selected_period
+
+            default_mtd_active = selected_period == "current"
+            if st.session_state.get(mtd_period_key) != selected_period:
+                st.session_state[mtd_state_key] = default_mtd_active
+                st.session_state[mtd_period_key] = selected_period
+
+            tax_button_slot.button(
+                "Tax",
+                key=f"tax-toggle-{account}",
+                type="primary" if st.session_state[tax_state_key] else "secondary",
+                on_click=toggle_flag,
+                args=(tax_state_key,),
+            )
+            mtd_button_slot.button(
+                "MTD",
+                key=f"mtd-toggle-{account}",
+                type="primary" if st.session_state[mtd_state_key] else "secondary",
+                on_click=toggle_flag,
+                args=(mtd_state_key,),
+            )
+
             selected_anchor_date = None
+            row_label_reference = None
+            selected_month_key = None
+            mtd_active = st.session_state[mtd_state_key]
             if selected_period == "current":
-                selected_account_df = base_account_df
-                file_suffix = "stato_attuale"
                 if not account_months.empty:
                     selected_anchor_date = account_months.iloc[0]["anchor_date"]
-            else:
-                month_key = selected_period.split(":", 1)[1]
-                selected_anchor_date = month_to_anchor.get(month_key)
-                if selected_anchor_date:
-                    historical_df = load_data_for_anchor(
-                        db_name, table_name, selected_anchor_date
+                    selected_month_key = account_months.iloc[0]["month_start"].isoformat()
+                file_suffix = "stato_attuale"
+                if mtd_active:
+                    selected_account_df = base_account_df
+                    row_label_reference = selected_anchor_date
+                elif selected_month_key:
+                    historical_df = load_data_for_month(
+                        db_name, table_name, selected_month_key, db_cache_buster
                     )
                     selected_account_df = historical_df[historical_df["account"] == account]
+                    row_label_reference = selected_month_key
+                else:
+                    selected_account_df = pd.DataFrame(columns=base_account_df.columns)
+            else:
+                month_key = selected_period.split(":", 1)[1]
+                selected_month_key = month_key
+                selected_anchor_date = month_to_anchor.get(month_key)
+                if selected_anchor_date and mtd_active:
+                    historical_df = load_data_for_anchor(
+                        db_name, table_name, selected_anchor_date, db_cache_buster
+                    )
+                    selected_account_df = historical_df[historical_df["account"] == account]
+                    row_label_reference = selected_anchor_date
+                elif selected_anchor_date:
+                    historical_df = load_data_for_month(
+                        db_name, table_name, month_key, db_cache_buster
+                    )
+                    selected_account_df = historical_df[historical_df["account"] == account]
+                    row_label_reference = month_key
                 else:
                     selected_account_df = pd.DataFrame(columns=base_account_df.columns)
                 file_suffix = month_key[:7]
 
+            selected_tax_mode = "tax" if st.session_state[tax_state_key] else "no tax"
+            selected_account_df = apply_tax_filter(
+                selected_account_df, selected_tax_mode
+            )
+            row_labels = build_row_labels(row_label_reference)
+
             download_columns, download_values, download_pcts = build_download_payload(
-                selected_account_df
+                selected_account_df, row_labels
             )
 
             excel_bytes = build_excel_bytes(
@@ -342,14 +415,14 @@ def render_page(db_name: str, table_name: str) -> None:
         )
 
         header_cells = [
-            '<th class="metric-col">Metric (MTD)</th>',
+            '<th class="metric-col">Metric</th>',
             '<th class="total-col">Total</th>',
         ] + [f"<th>{html.escape(service)}</th>" for service in selected_services]
         header_row = f"<tr>{''.join(header_cells)}</tr>"
 
         body_rows = []
         for metric, delta_col, pct_col in ROW_DEFS:
-            label = html.escape(ROW_LABELS.get(metric, metric))
+            label = html.escape(row_labels.get(metric, metric))
             invert_colors = True
             total_cell = format_cell(
                 selected_totals.get(metric),

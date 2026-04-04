@@ -3,10 +3,10 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_FILE="${APP_FILE:-src/app/app.py}"
 AWS_CLI_BIN="${AWS_CLI_BIN:-aws}"
 VENV_BIN_DIR="${VENV_BIN_DIR:-$ROOT_DIR/.venv/bin}"
 RUN_COLLECTORS=0
+CHECKER_ALLOW_AWS_SSO_LOGIN="${CHECKER_ALLOW_AWS_SSO_LOGIN:-1}"
 
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   if [[ -x "$VENV_BIN_DIR/python" ]]; then
@@ -21,8 +21,6 @@ fi
 if [[ -z "${STREAMLIT_BIN:-}" ]]; then
   if [[ -x "$VENV_BIN_DIR/streamlit" ]]; then
     STREAMLIT_BIN="$VENV_BIN_DIR/streamlit"
-  else
-    STREAMLIT_BIN="streamlit"
   fi
 fi
 
@@ -36,11 +34,13 @@ Options:
 
 Env utili:
   PYTHON_BIN         Interprete Python da usare per i collector e come fallback per Streamlit.
-  STREAMLIT_BIN      Binario Streamlit da usare. Default: .venv/bin/streamlit se presente
+  STREAMLIT_BIN      Binario Streamlit da usare. Default: python -m streamlit
   AWS_CLI_BIN        Binario AWS CLI da usare per aws sso login. Default: aws
   AWS_PROFILE        Se impostato, viene passato ad aws sso login --profile <profile>
-  APP_FILE           Entry point Streamlit. Default: src/app/app.py
   VENV_BIN_DIR       Directory bin del virtualenv. Default: .venv/bin
+  DUCKDB_S3_URI      Se impostato, scarica il DB da S3 prima dell'avvio dashboard.
+  CHECKER_ALLOW_AWS_SSO_LOGIN
+                     Default: 1. Se 0, non tenta aws sso login al fallimento.
 EOF
 }
 
@@ -99,30 +99,30 @@ is_aws_login_error() {
     "$output_file"
 }
 
-run_python_script() {
-  local script_path="$1"
-  local label="$2"
+run_python_command() {
+  local label="$1"
   local tmp_output
+  shift
 
   tmp_output="$(mktemp)"
-  log "Eseguo $label: $script_path"
+  log "Eseguo $label: $*"
 
   if (
     cd "$ROOT_DIR" &&
-    "$PYTHON_BIN" "$script_path"
+    "$PYTHON_BIN" "$@"
   ) > >(tee "$tmp_output") 2> >(tee -a "$tmp_output" >&2); then
     rm -f "$tmp_output"
     return 0
   fi
 
-  if is_aws_login_error "$tmp_output"; then
+  if [[ "$CHECKER_ALLOW_AWS_SSO_LOGIN" != "0" ]] && is_aws_login_error "$tmp_output"; then
     rm -f "$tmp_output"
     aws_login
     tmp_output="$(mktemp)"
     log "Ritento $label dopo aws sso login."
     if (
       cd "$ROOT_DIR" &&
-      "$PYTHON_BIN" "$script_path"
+      "$PYTHON_BIN" "$@"
     ) > >(tee "$tmp_output") 2> >(tee -a "$tmp_output" >&2); then
       rm -f "$tmp_output"
       return 0
@@ -133,18 +133,11 @@ run_python_script() {
   return 1
 }
 
-start_streamlit() {
-  ensure_command "$STREAMLIT_BIN"
-  cd "$ROOT_DIR"
-  exec "$STREAMLIT_BIN" run "$APP_FILE"
-}
-
 ensure_command "$PYTHON_BIN"
+MAIN_ARGS=("$ROOT_DIR/main.py" "dashboard")
 
 if ((RUN_COLLECTORS)); then
-  run_python_script "src/collector.py" "cost collector"
-  run_python_script "src/pod_collector.py" "pod collector"
+  MAIN_ARGS+=("--collect")
 fi
 
-log "Avvio Streamlit."
-start_streamlit
+run_python_command "checker dashboard" "${MAIN_ARGS[@]}"
